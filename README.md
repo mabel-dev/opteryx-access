@@ -168,3 +168,7 @@ requires it -- consistent with opteryx-core's zero-dependency convention.
 
 To cut a release: bump `version` in `pyproject.toml`, merge to `main`, then
 `git tag version-X.Y.Z && git push origin version-X.Y.Z`.
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE) for details.
