@@ -1,0 +1,64 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  # Lets release.yaml gate publishing on this exact suite, so the release
+  # check can never drift from the one that runs on PRs.
+  workflow_call:
+
+# A newer push to the same branch makes the in-flight run irrelevant. Releases
+# are keyed on the tag ref, so a release run is never cancelled by branch work.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  pytest:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't let one version failing hide the result on the others.
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: pip
+
+    - name: deps
+      run: |
+        python -m pip install -U pip
+        python -m pip install -e ".[dev]"
+
+    - name: test
+      run: python -m pytest tests/ -v --durations=10
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+        cache: pip
+
+    - name: deps
+      run: python -m pip install -U ruff
+
+    - name: check
+      run: ruff check opteryx_access/ tests/
+
+    - name: format
+      run: ruff format --check opteryx_access/ tests/

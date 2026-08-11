@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opteryx_access"
+version = "0.0.0"
+description = "Permission checks and grant/revoke for the Opteryx platform"
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [
+    { name = "joocer", email = "justin.joyce@joocer.com" }
+]
+requires-python = ">=3.13"
+# No hard dependencies -- the roles/actions/patterns/checks surface is pure
+# Python so it can be imported from opteryx-core (the query engine) without
+# dragging in a Firestore client. Storage adapters declare their own needs
+# under [project.optional-dependencies] and import them lazily.
+dependencies = []
+
+[project.optional-dependencies]
+firestore = [
+    "google-cloud-firestore==2.*",
+]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "opteryx_access[firestore]",
+]
+
+[tool.setuptools.packages.find]
+include = ["opteryx_access*"]
+
+[tool.isort]
+profile = "black"
+force_single_line = true
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint.isort]
+force-single-line = true
