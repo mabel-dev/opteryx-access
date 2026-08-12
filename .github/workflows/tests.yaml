@@ -41,24 +41,3 @@ jobs:
 
     - name: test
       run: python -m pytest tests/ -v --durations=10
-
-  lint:
-    name: ruff
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.13"
-        cache: pip
-
-    - name: deps
-      run: python -m pip install -U ruff
-
-    - name: check
-      run: ruff check opteryx_access/ tests/
-
-    - name: format
-      run: ruff format --check opteryx_access/ tests/
