@@ -9,11 +9,16 @@ adapter is what breaks.
 from dataclasses import dataclass
 from dataclasses import field
 
+import pytest
+from fakes import FakePolicyStore
+
 from opteryx_access.actions import ACTION_ROLES
 from opteryx_access.actions import DATA_ACTIONS
 from opteryx_access.actions import POLICY_ADMINISTRATION_ACTIONS
 from opteryx_access.capability import PermissionsCapability
 from opteryx_access.capability import capability
+from opteryx_access.exceptions import PolicyStoreRequiredError
+from opteryx_access.models import Policy
 from opteryx_access.roles import ROLES
 
 
@@ -25,10 +30,15 @@ class FakeExecutionContext:
     access_policies: list = field(default_factory=list)
 
 
-def test_capability_provides_the_three_members_the_engine_requires():
+def test_capability_provides_the_four_members_the_engine_requires():
     # Mirrors opteryx-core's _REQUIRED_MEMBERS check at registration.
     cap = capability()
-    for member in ("can_perform_action", "can_perform_workspace_action", "grants"):
+    for member in (
+        "can_perform_action",
+        "can_perform_workspace_action",
+        "can_principal_perform_action",
+        "grants",
+    ):
         assert getattr(cap, member, None) is not None, member
 
 
@@ -135,6 +145,67 @@ def test_a_writer_over_the_whole_workspace_still_cannot_alter_it():
         user="alice", access_policies=[{"pattern": "analytics.*", "role": "writer"}]
     )
     assert not capability().can_perform_workspace_action(context, "analytics", "ALTER")
+
+
+# --- can_principal_perform_action
+#
+# The one check with no execution context: it is asked about somebody who is
+# not the caller, so their grants come from the store rather than from a
+# session that was issued them. The engine needs it where a statement names an
+# identity to act AS -- `ALTER MATERIALIZED VIEW ... OWNER TO`.
+
+
+def _store_holding(principal: str, role: str, pattern: str) -> FakePolicyStore:
+    store = FakePolicyStore()
+    store.seed(pattern.split(".", 1)[0], Policy(principal=principal, role=role, pattern=pattern))
+    return store
+
+
+def test_a_principal_is_judged_on_their_own_stored_policies():
+    cap = capability(_store_holding("ginny", "reader", "analytics.*"))
+    assert cap.can_principal_perform_action("ginny", "analytics.sales.q1", "READ")
+    assert not cap.can_principal_perform_action("ginny", "analytics.sales.q1", "DELETE")
+
+
+def test_a_principal_holding_nothing_is_permitted_nothing():
+    cap = capability(FakePolicyStore())
+    assert not cap.can_principal_perform_action("ginny", "analytics.sales.q1", "READ")
+
+
+def test_one_principals_authority_does_not_answer_for_another():
+    """The reason this check exists. alice owning the workspace says nothing
+    about ginny, and must not be allowed to stand in for her."""
+    cap = capability(_store_holding("alice", "owner", "analytics.*"))
+    assert cap.can_principal_perform_action("alice", "analytics.sales.q1", "READ")
+    assert not cap.can_principal_perform_action("ginny", "analytics.sales.q1", "READ")
+
+
+def test_a_principal_keeps_their_implicit_grants():
+    """Judged by the same rules that would judge them running the query, so
+    `public.*` and their own `personal.` namespace come with them."""
+    cap = capability(FakePolicyStore())
+    assert cap.can_principal_perform_action("ginny", "public.gdelt.events", "READ")
+    assert cap.can_principal_perform_action("ginny", "personal.ginny.scratch", "DROP")
+    assert not cap.can_principal_perform_action("ginny", "personal.alice.scratch", "READ")
+
+
+def test_a_principal_is_normalized_like_any_other_identity():
+    cap = capability(_store_holding("ginny", "reader", "analytics.*"))
+    assert cap.can_principal_perform_action("GINNY", "analytics.sales.q1", "READ")
+
+
+def test_a_local_relation_needs_no_store():
+    """The dotless-name rule `can_perform_action` applies, and it is reached
+    before the store is, so a name with no workspace needs none."""
+    cap = capability()
+    assert cap.can_principal_perform_action("ginny", "scratch_table", "READ")
+    assert not cap.can_principal_perform_action("ginny", "scratch_table", "DROP")
+
+
+def test_without_a_store_the_check_raises_rather_than_denying():
+    """A check that could not run is not a check that ran and said no."""
+    with pytest.raises(PolicyStoreRequiredError):
+        capability().can_principal_perform_action("ginny", "analytics.sales.q1", "READ")
 
 
 # --- grants (SHOW GRANTS)

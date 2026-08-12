@@ -16,6 +16,13 @@ context and this reads two attributes off it. So the dependency points one way
 only -- a deployment brings the two together, neither package requires the
 other, and this file can be read as the full extent of the coupling.
 
+Most checks are answered from that context alone. One is not:
+`can_principal_perform_action` is asked about somebody who is not the caller,
+whose policies this process was never issued, so a capability that has to
+answer it is constructed with a `PolicyStore` to read them from:
+
+    opteryx.register_permissions_capability(opteryx_access.capability(store))
+
 The engine's own permission checks and `SHOW GRANTS` are both answered from
 here, so what it enforces and what it reports come from one evaluation.
 """
@@ -25,8 +32,12 @@ from opteryx_access.actions import DATA_ACTIONS
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
 from opteryx_access.checks import implicit_grants
+from opteryx_access.exceptions import PolicyStoreRequiredError
+from opteryx_access.grants import grants_for_principal
 from opteryx_access.models import Grant
 from opteryx_access.models import parse_policy_claim
+from opteryx_access.patterns import normalize
+from opteryx_access.store import PolicyStore
 
 __all__ = ("PermissionsCapability", "capability")
 
@@ -64,16 +75,22 @@ def _actions_for(role: str) -> str:
 class PermissionsCapability:
     """Answers opteryx-core's permission checks from issued access policies.
 
-    Stateless: every answer is computed from the execution context handed in,
-    so one instance serves every session and there is nothing to invalidate.
+    Holds no session state: every answer is computed from the execution context
+    handed in, so one instance serves every session and there is nothing to
+    invalidate. The `PolicyStore` it may be constructed with is not session
+    state either -- it is read through, never read from a cache.
 
     The grants are rebuilt from `execution_context.access_policies` on each
     check rather than cached against the context. A cache would have to
     guess when that list changed, and a permission cache that answers from a
     stale list is a security bug in a way that a little repeated work is not.
+    The same applies to what is read from the store.
     """
 
     name = "opteryx-access"
+
+    def __init__(self, store: PolicyStore | None = None) -> None:
+        self._store = store
 
     def can_perform_action(self, execution_context, resource: str, action: str) -> bool:
         return can_perform_action(
@@ -88,6 +105,52 @@ class PermissionsCapability:
             _grants(getattr(execution_context, "access_policies", None) or ()),
             workspace,
             action,
+        )
+
+    def can_principal_perform_action(self, principal: str, resource: str, action: str) -> bool:
+        """Whether `principal` may perform `action` on `resource`.
+
+        Asked about somebody who is not the caller. There is no execution
+        context because that principal has no session here, and the asking
+        session's policies say nothing about what they hold -- so their grants
+        are read from the store rather than handed over.
+
+        The engine needs this wherever a statement names an identity to act AS
+        rather than acting as its author. `ALTER MATERIALIZED VIEW ... OWNER TO`
+        pins the identity a view's refresh runs as, and has to establish that
+        the incoming owner can read the view's sources before pinning them
+        there: a caller's own authority is not transferable by naming somebody
+        else.
+
+        Evaluated by the same `can_perform_action` the session-scoped check
+        uses, so a principal is judged by exactly the rules that would judge
+        them if they ran the query themselves -- implicit grants included,
+        since those are theirs whatever any store holds.
+
+        Raises:
+            PolicyStoreRequiredError: no store was supplied at construction, so
+                another principal's policies cannot be read.
+        """
+        if resource.count(".") == 0:
+            # `can_perform_action`'s rule, for the same reason: a name with no
+            # dot is a local, in-session table, and there is no workspace to
+            # look a policy up in.
+            return action == "READ"
+
+        if self._store is None:
+            raise PolicyStoreRequiredError(
+                f"cannot decide whether {principal!r} may {action} {resource!r}: this "
+                "capability was built by capability() with no PolicyStore, so it can "
+                "only answer about the session that is asking. Build it as "
+                "capability(store) to answer about other principals."
+            )
+
+        workspace = normalize(resource).split(".", 1)[0]
+        return can_perform_action(
+            grants_for_principal(self._store, workspace=workspace, identity=principal),
+            resource,
+            action,
+            identity=principal,
         )
 
     def grants(self, identity: str, policies: list) -> list[dict]:
@@ -105,6 +168,13 @@ class PermissionsCapability:
         ]
 
 
-def capability() -> PermissionsCapability:
-    """The capability to hand to `opteryx.register_permissions_capability`."""
-    return PermissionsCapability()
+def capability(store: PolicyStore | None = None) -> PermissionsCapability:
+    """The capability to hand to `opteryx.register_permissions_capability`.
+
+    `store` is needed only by `can_principal_perform_action`; the rest are
+    answered from the execution context the engine hands over. A deployment
+    running statements that name another principal -- `ALTER MATERIALIZED VIEW
+    ... OWNER TO` -- must supply one, and without it that check raises rather
+    than guessing at an answer it has no way to reach.
+    """
+    return PermissionsCapability(store)

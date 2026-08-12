@@ -42,3 +42,13 @@ class PolicyNotFoundError(OpteryxAccessError):
 
 class WorkspaceAlreadyBootstrappedError(OpteryxAccessError):
     """`bootstrap_workspace` was called on a workspace that already has policies."""
+
+
+class PolicyStoreRequiredError(OpteryxAccessError):
+    """A check about another principal was asked of a capability with no store.
+
+    Raised rather than answered `False`. The caller asked whether somebody may
+    do something and got no answer at all, which is not the same as being told
+    no -- and a permission check that quietly returns "denied" because it could
+    not read anything is how a check stops meaning what it says.
+    """
