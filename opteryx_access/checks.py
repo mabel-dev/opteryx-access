@@ -13,9 +13,15 @@ Two families of check, ported from two previously-separate implementations:
   control.opteryx's `app/routes/v1/access.py` (`_check_pattern_access`,
   `_check_workspace_access`).
 
-Both families are kept because they answer different questions over
-different inputs -- see `opteryx_access.roles` for why they must not be
-collapsed into one rank comparison.
+The two families take different inputs because they answer different
+questions: a `Grant` is role plus pattern, all that deciding a data action
+needs; a `Policy` also carries the principal it was issued to, which is what
+an administrative check has to reason about.
+
+Administering grants is not a separate notion of authority with its own role
+list -- it is the `GRANT` action in `opteryx_access.actions.ACTION_ROLES`,
+checked the same way as any other action, so what it requires is stated once
+in that table alongside `DROP` and the rest.
 """
 
 from collections.abc import Iterable
@@ -23,9 +29,9 @@ from collections.abc import Iterable
 from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
-from opteryx_access.patterns import WILDCARD_PRINCIPAL
+from opteryx_access.patterns import escape_glob
+from opteryx_access.patterns import normalize
 from opteryx_access.patterns import resource_matches
-from opteryx_access.roles import ADMINISTRATIVE_ROLES
 
 
 def implicit_grants(identity: str | None) -> list[Grant]:
@@ -36,15 +42,17 @@ def implicit_grants(identity: str | None) -> list[Grant]:
     them, so a data-action check and a "what do I have access to" listing
     can't drift into disagreeing about what a caller implicitly holds.
 
-    Every pattern is `<namespace>.*`; `can_perform_action` matches it as a
-    literal prefix rather than a glob -- see that function for why.
+    The identity is escaped into its pattern (see `escape_glob`): unlike an
+    issued policy's pattern, this one is built around a value that was never
+    validated as a pattern, so glob metacharacters in it must not widen the
+    namespace the caller owns.
 
     An anonymous session (no identity) holds no personal namespace: there is
     no `personal.<nobody>` for it to own.
     """
     grants = []
     if identity:
-        grants.append(Grant(role="owner", pattern=f"personal.{identity}.*"))
+        grants.append(Grant(role="owner", pattern=f"personal.{escape_glob(normalize(identity))}.*"))
     grants.append(Grant(role="reader", pattern="public.*"))
     return grants
 
@@ -65,18 +73,15 @@ def can_perform_action(
 
     Implicit grants (see `implicit_grants`) are checked first and CAP what
     they cover: a resource inside `public.` or inside the caller's own
-    `personal.` namespace is answered here and does not fall through to
+    `personal.` namespace is answered there and does not fall through to
     `grants`. That is what makes `public.` read-only for everyone regardless
-    of what an issued policy might otherwise say about it. The trailing `*`
-    is matched as a literal prefix, not a glob, so glob metacharacters in an
-    identity can't widen the namespace it owns.
+    of what an issued policy might otherwise say about it.
     """
     if resource.count(".") == 0:
         return action == "READ"
 
     for implicit in implicit_grants(identity):
-        prefix = implicit.pattern[:-1]  # strip the trailing "*", keep the "."
-        if resource.startswith(prefix):
+        if resource_matches(resource, implicit.pattern):
             return action_allowed_for_role(implicit.role, action)
 
     for grant in grants:
@@ -101,54 +106,62 @@ def can_perform_workspace_action(
 
     A grant covers a workspace action only when it covers the workspace in
     full: `ws.*` (how ownership of a whole workspace is issued) qualifies, as
-    does a pattern matching the bare name (`ws`, `*`). A grant scoped to part
-    of a workspace (`ws.coll.*`) does not -- stripped of its trailing `.*` it
-    reduces to `ws.coll`, which is not the workspace itself.
+    does the bare name `ws`. A grant scoped to part of a workspace
+    (`ws.coll.*`) does not -- stripped of its trailing `.*` it reduces to
+    `ws.coll`, which is not the workspace itself.
     """
     for grant in grants:
         if not action_allowed_for_role(grant.role, action):
             continue
-        covered = grant.pattern.removesuffix(".*")
+        covered = normalize(grant.pattern).removesuffix(".*")
         if resource_matches(workspace, covered):
             return True
     return False
 
 
 def can_administer_pattern(policies: Iterable[Policy], identity: str, pattern: str) -> bool:
-    """Whether `identity` holds administrative (owner) authority over `pattern`.
+    """Whether `identity` may grant and revoke access covering `pattern`.
 
-    Having owner authority *somewhere* in the workspace is not enough: a
+    Holding a grantable role *somewhere* in the workspace is not enough: a
     grantor who owns `billing.*` must not be able to mint grants on an
-    unrelated pattern like `ops.*` they have no authority over. This requires
-    the caller's own owner pattern to cover (via `resource_matches`) the
-    pattern being granted, updated, or deleted, so authority can't escalate
-    outside the scope the grantor was actually given.
+    unrelated pattern like `ops.*` they have no authority over. Their own
+    policy has to cover (via `resource_matches`) the pattern being granted,
+    updated, or deleted, so authority can't escalate outside the scope they
+    were actually given.
+
+    `policies` may be pre-filtered to `identity` by the caller -- the
+    principal is checked here regardless, so that a store which filters
+    wrongly cannot widen who is treated as the grantor. Both sides are
+    normalized, so a policy stored before principals were casefolded still
+    resolves to the identity it was meant for.
     """
     if not pattern:
         return False
+    identity = normalize(identity)
     for policy in policies:
-        if policy.principal not in (identity, WILDCARD_PRINCIPAL):
+        if normalize(policy.principal) != identity:
             continue
-        if policy.role in ADMINISTRATIVE_ROLES and resource_matches(pattern, policy.pattern):
+        if action_allowed_for_role(policy.role, "GRANT") and resource_matches(
+            pattern, policy.pattern
+        ):
             return True
     return False
 
 
 def has_workspace_access(policies: Iterable[Policy], identity: str) -> bool:
-    """Whether `identity` holds owner access anywhere among `policies`.
+    """Whether `identity` holds a policy that can administer anything here.
 
     `policies` is expected to already be scoped to one workspace (i.e. the
     result of listing that workspace's policy store). Weaker than
-    `can_administer_pattern`: this only proves administrative authority
-    exists somewhere, not that it covers a specific pattern. Use this for
-    "may view this workspace's policy list", "may export its full
-    effective-permissions map"; use `can_administer_pattern` before mutating
-    any specific policy.
+    `can_administer_pattern`: this proves only that such a policy exists, not
+    that it covers a specific pattern. Use it for "may view this workspace's
+    policy list" and "may export its effective-permissions map"; use
+    `can_administer_pattern` before mutating any specific policy.
     """
+    identity = normalize(identity)
     for policy in policies:
-        if (
-            policy.principal in (identity, WILDCARD_PRINCIPAL)
-            and policy.role in ADMINISTRATIVE_ROLES
+        if normalize(policy.principal) == identity and action_allowed_for_role(
+            policy.role, "GRANT"
         ):
             return True
     return False

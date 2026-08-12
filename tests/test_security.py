@@ -11,13 +11,17 @@ from opteryx_access.actions import ACTION_ROLES
 from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
+from opteryx_access.checks import has_workspace_access
 from opteryx_access.exceptions import AccessDeniedError
 from opteryx_access.exceptions import InvalidPatternError
+from opteryx_access.exceptions import InvalidRoleError
+from opteryx_access.exceptions import SelfAccessError
+from opteryx_access.grants import bootstrap_workspace
+from opteryx_access.grants import grant
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
-from opteryx_access.patterns import validate_pattern_does_not_target_reserved_resource
+from opteryx_access.patterns import validate_pattern
 from opteryx_access.roles import ROLES
-from opteryx_access.store import grant
 
 # ---------------------------------------------------------------------------
 # ACTION_ROLES: exhaustive role x action matrix, not spot checks.
@@ -102,30 +106,34 @@ def test_principal_matching_is_exact_not_glob():
 
 
 # ---------------------------------------------------------------------------
-# Reserved resources: the check itself must not be bypassable by case or by
-# a glob that merely could match the reserved name.
+# Reserved resources: not bypassable by case, and not by a glob that merely
+# could match the reserved name.
 # ---------------------------------------------------------------------------
 
 
-def test_reserved_workspace_check_is_case_sensitive_and_deterministic():
-    # "Public"/"PUBLIC" must not slip past the reserved-workspace guard on
-    # a case-folding platform -- see patterns.py's fix from plain fnmatch to
-    # fnmatchcase. This pins the behavior so a regression to fnmatch (which
-    # folds case on Windows) is caught here rather than discovered on a
-    # specific OS in production.
-    validate_pattern_does_not_target_reserved_resource(
-        "Public.security"
-    )  # no raise: different literal workspace
-    validate_pattern_does_not_target_reserved_resource("PUBLIC.security")  # no raise
+@pytest.mark.parametrize(
+    "pattern", ["public.security", "Public.security", "PUBLIC.security", "PeRsOnAl.alice.*"]
+)
+def test_reserved_workspace_check_is_case_insensitive(pattern):
+    # Names are normalized before anything looks at them, so a reserved
+    # workspace cannot be reached by changing case -- and the answer is the
+    # same on every platform, unlike plain `fnmatch`, which folds case per-OS.
     with pytest.raises(InvalidPatternError):
-        validate_pattern_does_not_target_reserved_resource("public.security")
+        validate_pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", ["pub*.security", "p*.security", "*.security"])
+def test_reserved_workspace_cannot_be_reached_by_a_partial_glob(pattern):
+    # A workspace segment is either a literal name or nothing -- there are no
+    # partial globs to evade the reserved list with.
+    with pytest.raises(InvalidPatternError):
+        validate_pattern(pattern)
 
 
 def test_reserved_workspace_cannot_be_granted_even_by_a_pattern_owner():
     store = FakePolicyStore()
-    # Contrived: even if somehow an owner grant existed scoped to "public.*"
-    # (grant() itself would never create one -- see the wildcard-principal
-    # test below), attempting to grant *through* it must still be rejected.
+    # Contrived: even if an owner grant somehow existed scoped to "public.*",
+    # granting *through* it must still be rejected.
     store.seed("public", Policy(principal="alice", role="owner", pattern="public.*"))
     with pytest.raises(InvalidPatternError):
         grant(
@@ -147,8 +155,6 @@ def test_reserved_workspace_cannot_be_granted_even_by_a_pattern_owner():
 def test_self_grant_denied_even_with_full_administrative_authority():
     store = FakePolicyStore()
     store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
-    from opteryx_access.exceptions import SelfAccessError
-
     with pytest.raises(SelfAccessError):
         grant(
             store,
@@ -160,24 +166,35 @@ def test_self_grant_denied_even_with_full_administrative_authority():
         )
 
 
-def test_wildcard_principal_grant_cannot_be_used_to_self_grant():
-    # Granting to "*" (everyone) is not a loophole for self-service: an
-    # owner is still an "identity", and the self-grant check compares actor
-    # to the requested principal directly, not through pattern matching --
-    # confirm "*" as principal is a distinct, allowed target, and does not
-    # somehow subvert the check when the actor's own identity is "*" (not a
-    # realistic identity, but the comparison must still hold exactly).
+def test_cannot_grant_to_everyone():
+    # There is no wildcard principal: a grant everyone holds is not something
+    # any listing surfaces as unusual, so it cannot be written at all.
     store = FakePolicyStore()
     store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
-    policy_id = grant(
-        store,
-        actor="alice",
-        workspace="analytics",
-        principal="*",
-        role="reader",
-        pattern="analytics.dashboard",
-    )
-    assert store.get_policy("analytics", policy_id).principal == "*"
+    with pytest.raises(InvalidPatternError):
+        grant(
+            store,
+            actor="alice",
+            workspace="analytics",
+            principal="*",
+            role="reader",
+            pattern="analytics.dashboard",
+        )
+
+
+def test_a_stored_wildcard_principal_confers_nothing():
+    # Defence in depth for the migration: if a "*" policy predates the rule
+    # above, it must not act as a grant to whoever happens to be asking.
+    policies = [Policy(principal="*", role="owner", pattern="analytics.*")]
+    assert not can_administer_pattern(policies, "anyone", "analytics.sales.q1")
+
+
+def test_principal_is_matched_exactly_not_by_pattern():
+    # Patterns are normalized and glob-matched; principals are neither. A
+    # policy belongs to exactly the identity string it names.
+    policies = [Policy(principal="alice", role="owner", pattern="analytics.*")]
+    assert can_administer_pattern(policies, "alice", "analytics.sales.q1")
+    assert not can_administer_pattern(policies, "alice.anything", "analytics.sales.q1")
 
 
 # ---------------------------------------------------------------------------
@@ -209,25 +226,51 @@ def test_implicit_grant_prefix_match_does_not_leak_across_identities():
 
 
 # ---------------------------------------------------------------------------
-# "admin" is not a role this package recognizes at all (it belongs
-# exclusively to billing_role -- see roles.py). A stray "admin" value must be
-# inert everywhere permissions are actually enforced, not just excluded from
-# some subset of actions.
+# A role outside `ROLES` is inert at every enforcement point -- it grants
+# nothing and cannot be stored. The property is general; the values below are
+# chosen to cover the ways one realistically shows up: "admin" is still a
+# live role in the not-yet-migrated services, so it is the stale value most
+# likely to appear in an existing stored policy, and "Owner" would pass a
+# case-insensitive comparison if one ever crept in.
 # ---------------------------------------------------------------------------
 
+UNRECOGNIZED_ROLES = ("admin", "superuser", "Owner", "")
 
-def test_admin_role_cannot_grant_anything():
+
+@pytest.mark.parametrize("role", UNRECOGNIZED_ROLES)
+def test_unrecognized_role_permits_no_action(role):
+    grants = [Grant(role=role, pattern="analytics.*")]
+    for action in ACTION_ROLES:
+        assert not can_perform_action(grants, "analytics.sales.q1", action), action
+
+
+@pytest.mark.parametrize("role", UNRECOGNIZED_ROLES)
+def test_unrecognized_role_carries_no_administrative_authority(role):
+    policies = [Policy(principal="alice", role=role, pattern="analytics.*")]
+    assert not can_administer_pattern(policies, "alice", "analytics.sales.*")
+    assert not has_workspace_access(policies, "alice")
+
+
+@pytest.mark.parametrize("role", UNRECOGNIZED_ROLES)
+def test_unrecognized_role_cannot_be_granted(role):
     store = FakePolicyStore()
-    store.seed("analytics", Policy(principal="alice", role="admin", pattern="analytics.*"))
-    with pytest.raises(AccessDeniedError):
+    store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
+    with pytest.raises(InvalidRoleError):
         grant(
             store,
             actor="alice",
             workspace="analytics",
             principal="bob",
-            role="reader",
+            role=role,
             pattern="analytics.sales.*",
         )
+
+
+@pytest.mark.parametrize("role", UNRECOGNIZED_ROLES)
+def test_unrecognized_role_cannot_bootstrap_a_workspace(role):
+    store = FakePolicyStore()
+    with pytest.raises(InvalidRoleError):
+        bootstrap_workspace(store, actor="alice", workspace="newspace", grants=[("bob", role)])
 
 
 def test_owner_may_grant_owner_to_a_third_party():

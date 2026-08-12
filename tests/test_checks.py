@@ -18,14 +18,6 @@ def test_writer_grant_permits_delete_not_drop():
     assert not can_perform_action(grants, "analytics.sales.q1", "DROP")
 
 
-def test_admin_grant_permits_nothing():
-    # "admin" isn't a role in this package at all (see roles.py) -- a grant
-    # carrying it must be inert, not just excluded from some actions.
-    grants = [Grant(role="admin", pattern="analytics.*")]
-    assert not can_perform_action(grants, "analytics.sales.q1", "READ")
-    assert not can_perform_action(grants, "analytics.sales.q1", "DELETE")
-
-
 def test_no_matching_grant_denies():
     grants = [Grant(role="writer", pattern="analytics.sales.*")]
     assert not can_perform_action(grants, "billing.invoices.q1", "READ")
@@ -109,19 +101,13 @@ def test_can_administer_pattern_writer_is_insufficient():
     assert not can_administer_pattern(policies, "alice", "analytics.sales.*")
 
 
-def test_wildcard_principal_policy_grants_administer_to_everyone():
-    policies = [Policy(principal="*", role="owner", pattern="analytics.public.*")]
-    assert can_administer_pattern(policies, "anyone", "analytics.public.dashboard")
-
-
-def test_can_administer_pattern_admin_role_is_insufficient():
-    # A stray "admin" (e.g. leftover from a caller that hasn't cut over off
-    # the old four-role model) must not carry administrative authority --
-    # only "owner" does now.
-    policies = [Policy(principal="alice", role="admin", pattern="analytics.*")]
-    assert not can_administer_pattern(policies, "alice", "analytics.sales.*")
-
-
-def test_has_workspace_access_admin_role_is_insufficient():
-    policies = [Policy(principal="alice", role="admin", pattern="analytics.*")]
-    assert not has_workspace_access(policies, "alice")
+def test_a_policy_only_applies_to_the_principal_it_names():
+    policies = [Policy(principal="alice", role="owner", pattern="analytics.*")]
+    assert can_administer_pattern(policies, "alice", "analytics.sales.q1")
+    assert not can_administer_pattern(policies, "bob", "analytics.sales.q1")
+    # Including "*", which is no longer a principal that means anyone.
+    assert not can_administer_pattern(
+        [Policy(principal="*", role="owner", pattern="analytics.*")],
+        "anyone",
+        "analytics.sales.q1",
+    )

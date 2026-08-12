@@ -27,12 +27,19 @@ class Grant:
 
 @dataclass
 class Policy:
-    """A stored access-policy document."""
+    """A stored access-policy document.
+
+    `workspace` is set by a store on anything it reads back. Most operations
+    are workspace-scoped and so already know it, but a cross-workspace read
+    (`opteryx_access.grants.owned_by`) has no other way to say where each
+    policy lives.
+    """
 
     principal: str
     role: str
     pattern: str
     policy_id: str | None = None
+    workspace: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     updated_by: str | None = None

@@ -24,14 +24,16 @@ Quick reference:
     # fetching what a principal holds, to hand to can_perform_action above:
     grants = grants_for_principal(store, workspace="analytics", identity="bob")
 
-See `opteryx_access.roles` for why "does this role satisfy this requirement"
-is two separate questions (administrative authority vs. data-action
-authority) rather than one rank comparison.
+"May this identity administer grants here?" and "may this role perform this
+action on this resource?" are separate questions -- see `opteryx_access.checks`,
+which implements each over the input it needs.
 """
 
 from opteryx_access.actions import ACTION_ROLES
 from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.actions import allowed_roles
+from opteryx_access.audit import AUDIT_LOGGER_NAME
+from opteryx_access.audit import set_audit_sink
 from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
@@ -45,35 +47,30 @@ from opteryx_access.exceptions import PolicyConflictError
 from opteryx_access.exceptions import PolicyNotFoundError
 from opteryx_access.exceptions import SelfAccessError
 from opteryx_access.exceptions import WorkspaceAlreadyBootstrappedError
+from opteryx_access.grants import bootstrap_workspace
+from opteryx_access.grants import find_conflict
+from opteryx_access.grants import grant
+from opteryx_access.grants import grants_for_principal
+from opteryx_access.grants import owned_by
+from opteryx_access.grants import revoke
+from opteryx_access.grants import update_grant
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.models import parse_policy_claim
 from opteryx_access.patterns import RESERVED_WORKSPACES
-from opteryx_access.patterns import WILDCARD_PRINCIPAL
 from opteryx_access.patterns import resource_matches
-from opteryx_access.patterns import validate_pattern_does_not_target_reserved_resource
-from opteryx_access.patterns import validate_wildcard_rule
-from opteryx_access.roles import ADMINISTRATIVE_ROLES
-from opteryx_access.roles import ROLE_RANK
+from opteryx_access.patterns import validate_pattern
+from opteryx_access.patterns import validate_principal
 from opteryx_access.roles import ROLES
 from opteryx_access.roles import is_valid_role
 from opteryx_access.roles import role_outranks_or_equals
-from opteryx_access.roles import role_rank
 from opteryx_access.store import PolicyStore
-from opteryx_access.store import bootstrap_workspace
-from opteryx_access.store import find_conflict
-from opteryx_access.store import grant
-from opteryx_access.store import grants_for_principal
-from opteryx_access.store import revoke
-from opteryx_access.store import update_grant
 
 __all__ = [
     "ACTION_ROLES",
-    "ADMINISTRATIVE_ROLES",
+    "AUDIT_LOGGER_NAME",
     "RESERVED_WORKSPACES",
     "ROLES",
-    "ROLE_RANK",
-    "WILDCARD_PRINCIPAL",
     "AccessDeniedError",
     "Grant",
     "InvalidPatternError",
@@ -97,12 +94,13 @@ __all__ = [
     "has_workspace_access",
     "implicit_grants",
     "is_valid_role",
+    "owned_by",
     "parse_policy_claim",
     "resource_matches",
     "revoke",
     "role_outranks_or_equals",
-    "role_rank",
+    "set_audit_sink",
     "update_grant",
-    "validate_pattern_does_not_target_reserved_resource",
-    "validate_wildcard_rule",
+    "validate_pattern",
+    "validate_principal",
 ]

@@ -1,22 +1,36 @@
-"""Resource-pattern matching and the invariants a pattern must satisfy.
+"""Resource patterns: what they may look like, and how they match.
 
-Ported from `policy.opteryx`/`control.opteryx`'s `app/models/policy.py` and
-`app/routes/v1/access.py` (identical in both -- see that repo's
-`docs/design/consolidation.md`), which is where these rules previously lived
-as the only copy.
+A pattern names data as `workspace[.collection[.dataset[...]]]`. Segments are
+dot-separated, and each is either a literal name or `*` standing for any one
+segment. The workspace segment must always be literal: a policy has to say
+which workspace it applies to, so there is no such thing as a grant over
+everything.
 
-Resource names and patterns are dot-separated (`workspace.collection.dataset`)
-and matched with shell-style globs (`analytics.*`, `analytics.sales.q1`).
+Names are lowercase. Patterns are normalized when validated and both sides
+are normalized again when matched, so matching is case-insensitive and
+decided identically on every platform -- unlike `fnmatch.fnmatch`, which
+folds case according to the OS it runs on.
+
+Because a segment is either `*` or a fully literal name, there are no partial
+globs (`pub*`) to reason about: a pattern either names a workspace exactly or
+is rejected. That is what lets the reserved-workspace check below be a plain
+membership test rather than a match against every reserved name.
 """
 
 import fnmatch
+import re
 
 from opteryx_access.exceptions import InvalidPatternError
 
-# Principal matching any authenticated user.
-WILDCARD_PRINCIPAL = "*"
+# A segment that stands for any single name.
+WILDCARD_SEGMENT = "*"
 
-# Characters that make a pattern segment match more than one resource.
+# A literal segment: lowercase alphanumerics and underscores, starting with a
+# letter. Anything else -- leading digits, punctuation, spaces, glob
+# metacharacters other than a whole-segment `*` -- is not a name we issue.
+_LITERAL_SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
+
+# Characters that would make a principal match more than one identity.
 _GLOB_CHARACTERS = "*?["
 
 # Workspaces that are never grantable through a policy -- access to them is
@@ -31,85 +45,113 @@ RESERVED_WORKSPACES: tuple[str, ...] = ("public", "personal")
 INFORMATION_SCHEMA_COLLECTION = "information_schema"
 
 
+def normalize(value: str) -> str:
+    """Casefold and trim `value` for comparison or storage."""
+    return value.strip().lower()
+
+
+def escape_glob(value: str) -> str:
+    """Neutralize glob metacharacters in `value` so it matches literally.
+
+    Used when a pattern is built around something that is not itself a
+    pattern -- an identity, say -- so that metacharacters in it cannot widen
+    what the resulting pattern covers.
+    """
+    return value.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+
+
 def resource_matches(resource: str, pattern: str) -> bool:
-    """Whether `pattern` covers `resource`.
+    """Whether `pattern` covers `resource`, case-insensitively.
 
-    Case-sensitive (`fnmatch.fnmatchcase`), not the platform's `fnmatch.fnmatch`.
-    Plain `fnmatch` folds case per the OS it runs on, so the same policy would
-    decide differently on macOS versus Linux -- some existing call sites (e.g.
-    opteryx-core's `ACTION_MAP` enforcement) use plain `fnmatch` for this reason
-    unaddressed; this is the corrected, deterministic behavior and the one new
-    integrations should use.
+    Both sides are normalized first, then compared with `fnmatchcase` -- the
+    case-sensitive matcher over already-casefolded values, which is how the
+    result stays identical across platforms.
     """
-    return fnmatch.fnmatchcase(resource, pattern)
+    return fnmatch.fnmatchcase(normalize(resource), normalize(pattern))
 
 
-def validate_wildcard_rule(principal: str, pattern: str) -> None:
-    """Reject policies that are wildcarded in both principal and pattern.
+def validate_principal(principal: str) -> str:
+    """Check `principal` names one individual, returning it normalized.
 
-    A policy may say "everyone, on this exact resource" or "this person, on
-    anything matching a pattern" -- but "everyone, on anything" is a grant
-    nobody would write on purpose and which no listing surfaces as unusual.
-    Requiring the wildcard principal to name its resource exactly keeps the
-    blast radius of "*" bounded and reviewable.
+    Policies are issued to named individuals. There is no wildcard principal
+    and no group principal: a grant everyone holds is not something any
+    listing surfaces as unusual, and groups are a thing we may add later as
+    their own concept rather than by overloading this field with a pattern.
+
+    Identities are casefolded, so `XB500` and `xb500` are one principal rather
+    than two people who each hold half the access. Everything that stores or
+    looks up a principal goes through here or `normalize`, so the write side
+    and the read side agree on the spelling -- normalizing on write alone
+    would mean a lookup for `xb500` silently missing a stored `XB500`.
 
     Raises:
-        InvalidPatternError: if both sides are wildcarded, or a wildcard
-            principal has no pattern.
+        InvalidPatternError: if `principal` is empty or is not a single
+            named identity.
     """
-    if principal != WILDCARD_PRINCIPAL:
-        return
+    identity = normalize(principal)
+    if not identity:
+        raise InvalidPatternError("a policy must name the principal it is granted to")
 
-    if not pattern:
+    if any(character in identity for character in _GLOB_CHARACTERS):
         raise InvalidPatternError(
-            "a policy for the wildcard principal '*' must specify an exact resource pattern"
+            f"principal {principal!r} is not allowed: a policy is granted to one named "
+            "individual, not to a pattern matching several"
         )
 
-    if any(ch in pattern for ch in _GLOB_CHARACTERS):
-        raise InvalidPatternError(
-            f"pattern {pattern!r} is not allowed for the wildcard principal '*': a policy "
-            "may use a wildcard principal or a wildcard pattern, not both. Specify a "
-            "fully-qualified resource."
-        )
+    return identity
 
 
-def validate_pattern_does_not_target_reserved_resource(
-    pattern: str, reserved_workspaces: tuple[str, ...] = RESERVED_WORKSPACES
-) -> None:
-    """Reject patterns that grant access to a reserved, non-grantable resource.
+def validate_pattern(pattern: str) -> str:
+    """Check `pattern` is a usable resource pattern, returning it normalized.
 
-    A workspace segment that merely *could* match a reserved name via a
-    wildcard (e.g. "*" or "pub*") is rejected too, not just an exact match --
-    otherwise the restriction is trivial to route around.
-
-    Case-sensitive (`fnmatchcase`), same as `resource_matches` -- see that
-    function for why plain `fnmatch` is not used here either: it would let
-    the reserved-workspace check itself decide differently by platform.
+    Enforces, in order: a non-empty pattern; every segment either `*` or a
+    literal name (which rejects empty segments like `a..b`, leading digits,
+    and stray punctuation); a literal workspace segment; a workspace that is
+    not reserved; and no grant over `information_schema`.
 
     Raises:
-        InvalidPatternError: if the pattern targets a reserved resource.
+        InvalidPatternError: with a message naming which rule was broken.
     """
-    parts = pattern.split(".", 2)
-    workspace = parts[0] if parts else ""
-    collection = parts[1] if len(parts) > 1 else None
+    normalized = normalize(pattern)
+    if not normalized:
+        raise InvalidPatternError("a policy must name the resources it applies to")
 
-    for reserved in reserved_workspaces:
-        if workspace and fnmatch.fnmatchcase(reserved, workspace):
+    segments = normalized.split(".")
+    for segment in segments:
+        if segment == WILDCARD_SEGMENT:
+            continue
+        if not _LITERAL_SEGMENT.match(segment):
             raise InvalidPatternError(
-                f"pattern {pattern!r} is not allowed: the {reserved!r} workspace cannot be "
-                "granted through a policy"
+                f"pattern {pattern!r} is not allowed: {segment!r} is not a usable name -- each "
+                "part must be '*' or start with a letter and use only letters, digits, and "
+                "underscores"
             )
 
-    if collection == INFORMATION_SCHEMA_COLLECTION:
+    workspace = segments[0]
+    if workspace == WILDCARD_SEGMENT:
+        raise InvalidPatternError(
+            f"pattern {pattern!r} is not allowed: a policy must name the workspace it applies "
+            "to, so the first part cannot be '*'"
+        )
+
+    if workspace in RESERVED_WORKSPACES:
+        raise InvalidPatternError(
+            f"pattern {pattern!r} is not allowed: the {workspace!r} workspace cannot be "
+            "granted through a policy"
+        )
+
+    if len(segments) > 1 and segments[1] == INFORMATION_SCHEMA_COLLECTION:
         raise InvalidPatternError(
             f"pattern {pattern!r} is not allowed: {INFORMATION_SCHEMA_COLLECTION!r} is a "
-            "synthetic per-workspace resource and cannot be granted independently"
+            "virtual per-workspace resource and cannot be granted independently"
         )
+
+    return normalized
 
 
 def pattern_segments(pattern: str) -> tuple[str, str | None, str | None]:
-    """Split a dot-separated resource pattern into (workspace, collection, dataset)."""
-    parts = pattern.split(".", 2)
+    """Split a pattern into (workspace, collection, dataset)."""
+    parts = normalize(pattern).split(".", 2)
     workspace = parts[0] if parts else ""
     collection = parts[1] if len(parts) > 1 else None
     dataset = parts[2] if len(parts) > 2 else None
@@ -117,5 +159,5 @@ def pattern_segments(pattern: str) -> tuple[str, str | None, str | None]:
 
 
 def is_literal_segment(segment: str | None) -> bool:
-    """True if `segment` is present and names an exact resource (no glob chars)."""
-    return bool(segment) and not any(ch in segment for ch in _GLOB_CHARACTERS)
+    """True if `segment` names one resource exactly rather than standing for any."""
+    return bool(segment) and segment != WILDCARD_SEGMENT

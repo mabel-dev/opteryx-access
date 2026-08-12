@@ -1,7 +1,9 @@
 """An in-memory PolicyStore for tests -- no Firestore required."""
 
 import itertools
+from dataclasses import replace
 
+from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.models import Policy
 
 
@@ -18,6 +20,27 @@ class FakePolicyStore:
 
     def list_policies(self, workspace: str) -> list[Policy]:
         return list(self._by_workspace.get(workspace, {}).values())
+
+    def list_policies_for_principal(self, workspace: str, principal: str) -> list[Policy]:
+        # Filters from the backing store directly rather than via
+        # `list_policies`, mirroring a real backend that pushes the predicate
+        # down -- so a test can tell the two access paths apart.
+        return [
+            policy
+            for policy in self._by_workspace.get(workspace, {}).values()
+            if policy.principal == principal
+        ]
+
+    def has_any_policies(self, workspace: str) -> bool:
+        return bool(self._by_workspace.get(workspace))
+
+    def list_owner_policies(self, principal: str) -> list[Policy]:
+        return [
+            replace(policy, workspace=workspace)
+            for workspace, policies in self._by_workspace.items()
+            for policy in policies.values()
+            if policy.principal == principal and action_allowed_for_role(policy.role, "GRANT")
+        ]
 
     def get_policy(self, workspace: str, policy_id: str) -> Policy | None:
         return self._by_workspace.get(workspace, {}).get(policy_id)

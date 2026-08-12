@@ -4,12 +4,9 @@ from opteryx_access.actions import allowed_roles
 from opteryx_access.roles import ROLES
 
 
-def test_admin_is_excluded_from_every_action():
-    # "admin" isn't a role in this package at all (see opteryx_access.roles) --
-    # confirm a stray "admin" string never grants anything, data or
-    # administrative.
+def test_role_outside_roles_permits_nothing():
     for action in ACTION_ROLES:
-        assert not action_allowed_for_role("admin", action), action
+        assert not action_allowed_for_role("superuser", action), action
 
 
 def test_only_owner_may_grant_and_revoke():

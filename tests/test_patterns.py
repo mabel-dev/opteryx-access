@@ -1,16 +1,15 @@
 import pytest
 
 from opteryx_access.exceptions import InvalidPatternError
+from opteryx_access.patterns import escape_glob
 from opteryx_access.patterns import is_literal_segment
+from opteryx_access.patterns import normalize
 from opteryx_access.patterns import pattern_segments
 from opteryx_access.patterns import resource_matches
-from opteryx_access.patterns import validate_pattern_does_not_target_reserved_resource
-from opteryx_access.patterns import validate_wildcard_rule
+from opteryx_access.patterns import validate_pattern
+from opteryx_access.patterns import validate_principal
 
-
-def test_resource_matches_is_case_sensitive():
-    assert resource_matches("analytics.sales.q1", "analytics.*")
-    assert not resource_matches("Analytics.sales.q1", "analytics.*")
+# --- matching ---------------------------------------------------------------
 
 
 def test_resource_matches_exact():
@@ -18,39 +17,113 @@ def test_resource_matches_exact():
     assert not resource_matches("analytics.sales.q2", "analytics.sales.q1")
 
 
-def test_wildcard_principal_requires_exact_pattern():
-    validate_wildcard_rule("*", "analytics.sales.q1")  # no raise
+def test_resource_matches_wildcard_segment():
+    assert resource_matches("analytics.sales.q1", "analytics.*")
+    assert not resource_matches("billing.sales.q1", "analytics.*")
+
+
+def test_resource_matches_is_case_insensitive_both_ways():
+    assert resource_matches("Analytics.Sales.Q1", "analytics.*")
+    assert resource_matches("analytics.stuff.here", "Analytics.*")
+    assert resource_matches("ANALYTICS.SALES.Q1", "analytics.sales.q1")
+
+
+def test_resource_matches_ignores_surrounding_whitespace():
+    assert resource_matches("  analytics.sales.q1  ", "analytics.*")
+
+
+# --- principals -------------------------------------------------------------
+
+
+def test_validate_principal_accepts_a_named_individual():
+    assert validate_principal("alice@example.com") == "alice@example.com"
+    assert validate_principal("  alice  ") == "alice"
+
+
+def test_validate_principal_rejects_the_wildcard():
+    # Policies are issued to named individuals; groups will be their own
+    # concept rather than a pattern smuggled into this field.
     with pytest.raises(InvalidPatternError):
-        validate_wildcard_rule("*", "analytics.*")
+        validate_principal("*")
+
+
+@pytest.mark.parametrize("principal", ["al*ce", "alic?", "alice[1]", "", "   "])
+def test_validate_principal_rejects_anything_matching_more_than_one(principal):
     with pytest.raises(InvalidPatternError):
-        validate_wildcard_rule("*", "")
+        validate_principal(principal)
 
 
-def test_non_wildcard_principal_may_use_glob_pattern():
-    validate_wildcard_rule("alice", "analytics.*")  # no raise
+# --- patterns ---------------------------------------------------------------
 
 
-def test_reserved_workspaces_rejected():
+def test_validate_pattern_normalizes():
+    assert validate_pattern("  Analytics.Sales.*  ") == "analytics.sales.*"
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["analytics", "analytics.*", "analytics.sales.*", "analytics.*.q1", "a1.b_2.c3"],
+)
+def test_validate_pattern_accepts_usable_patterns(pattern):
+    assert validate_pattern(pattern) == pattern
+
+
+def test_validate_pattern_requires_a_named_workspace():
+    # A policy always says which workspace it applies to -- there is no grant
+    # over everything.
     with pytest.raises(InvalidPatternError):
-        validate_pattern_does_not_target_reserved_resource("public.security")
+        validate_pattern("*")
     with pytest.raises(InvalidPatternError):
-        validate_pattern_does_not_target_reserved_resource("personal.alice.*")
+        validate_pattern("*.sales.q1")
 
 
-def test_reserved_workspace_rejected_even_via_glob():
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "",
+        "   ",
+        "a....*.bob11",  # empty segments
+        "analytics..sales",
+        ".analytics",
+        "analytics.",
+        "1analytics.sales",  # must start with a letter
+        "analytics.2sales",
+        "analytics.sa les",  # no spaces
+        "analytics.sa-les",  # no punctuation beyond . and _
+        "analytics.sales!",
+        "pub*.security",  # partial globs are not patterns we issue
+        "analytics.sale?",
+        "analytics.[abc]",
+    ],
+)
+def test_validate_pattern_rejects_unusable_patterns(pattern):
     with pytest.raises(InvalidPatternError):
-        validate_pattern_does_not_target_reserved_resource("*")
+        validate_pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", ["public.security", "personal.alice.*", "Public.security"])
+def test_validate_pattern_rejects_reserved_workspaces(pattern):
     with pytest.raises(InvalidPatternError):
-        validate_pattern_does_not_target_reserved_resource("pub*.security")
+        validate_pattern(pattern)
 
 
-def test_information_schema_rejected():
+def test_validate_pattern_rejects_information_schema():
     with pytest.raises(InvalidPatternError):
-        validate_pattern_does_not_target_reserved_resource("analytics.information_schema.*")
+        validate_pattern("analytics.information_schema.*")
 
 
-def test_ordinary_pattern_accepted():
-    validate_pattern_does_not_target_reserved_resource("analytics.sales.*")  # no raise
+# --- helpers ----------------------------------------------------------------
+
+
+def test_normalize():
+    assert normalize("  Analytics.Sales  ") == "analytics.sales"
+
+
+def test_escape_glob_makes_metacharacters_literal():
+    assert resource_matches("a*b", escape_glob("a*b"))
+    assert not resource_matches("axb", escape_glob("a*b"))
+    assert resource_matches("a[b", escape_glob("a[b"))
+    assert not resource_matches("ab", escape_glob("a?b"))
 
 
 def test_pattern_segments():

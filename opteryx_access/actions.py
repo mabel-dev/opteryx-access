@@ -1,20 +1,16 @@
-"""SQL-shaped actions mapped to the roles that may perform them.
+"""Actions mapped to the roles that may perform them.
 
 Single source of truth for "DELETE requires writer-or-owner", "DROP requires
 owner", etc. -- ported from opteryx-core's `opteryx.managers.permissions.ACTION_MAP`
-(the only place this mapping existed before), extended with GRANT/REVOKE so the
-policy-administration actions this package itself exposes (see `opteryx_access.store`)
-are declared in the same table instead of living as an implicit rule elsewhere.
+(the only place this mapping existed before), extended with GRANT/REVOKE so
+policy administration is declared here alongside the data actions instead of
+living as an implicit rule elsewhere.
 
-Deliberately a `{action: set-of-roles}` map, not a minimum-rank comparison,
-even though every entry today happens to be "top N roles by rank" and so
-could be read as one. Rank is a data-role-only concept (owner > writer >
-reader); an explicit per-action set stays correct if a future action's
-requirement doesn't nest that way, and it keeps each action's requirement
-self-documenting at its own definition rather than inferred from a number.
+An explicit set per action, rather than a minimum rank each action must
+clear: the requirement is stated where the action is defined, and stays
+correct for a future action whose requirement isn't simply "this rank and
+above".
 """
-
-from opteryx_access.roles import ADMINISTRATIVE_ROLES
 
 ACTION_ROLES = {
     "READ": {"reader", "writer", "owner"},
@@ -38,10 +34,11 @@ ACTION_ROLES = {
     # SHOW MANIFEST FOR exposes file paths and layout (bucket/partition
     # structure), not just data -- stricter than a normal READ.
     "MANIFEST": {"owner"},
-    # Policy administration: creating, updating, or revoking a grant.
-    # Owner-only, same as ADMINISTRATIVE_ROLES.
-    "GRANT": set(ADMINISTRATIVE_ROLES),
-    "REVOKE": set(ADMINISTRATIVE_ROLES),
+    # Granting and revoking access to a resource is the owner's to do -- the
+    # same tier as DROP, and for the same reason: it changes what the relation
+    # fundamentally is to everyone else, not just what is in it.
+    "GRANT": {"owner"},
+    "REVOKE": {"owner"},
 }
 
 
