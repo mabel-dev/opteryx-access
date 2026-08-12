@@ -38,6 +38,7 @@ from opteryx_access.audit import AUDIT_LOGGER_NAME
 from opteryx_access.audit import set_audit_sink
 from opteryx_access.capability import PermissionsCapability
 from opteryx_access.capability import capability
+from opteryx_access.checks import PLATFORM_IDENTITIES
 from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
@@ -74,6 +75,7 @@ __all__ = [
     "ACTION_ROLES",
     "AUDIT_LOGGER_NAME",
     "DATA_ACTIONS",
+    "PLATFORM_IDENTITIES",
     "POLICY_ADMINISTRATION_ACTIONS",
     "RESERVED_WORKSPACES",
     "ROLES",

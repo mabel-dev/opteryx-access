@@ -210,6 +210,26 @@ def test_implicit_public_read_only_survives_a_conflicting_owner_grant():
         assert not can_perform_action(grants, "public.security", action)
 
 
+def test_public_write_is_reachable_only_by_the_named_platform_identities():
+    # The `public` write exception is granted by name, to a closed set. It is
+    # not something an issued policy, an unusual role, or a lookalike identity
+    # can talk its way into -- the only way in is to *be* one of those names,
+    # which is why they have to be unregisterable wherever accounts are made.
+    owner_everywhere = [Grant(role="owner", pattern="public.*")]
+    for identity in (None, "alice", "federator2", "xb5000", "not-federator"):
+        assert not can_perform_action(
+            owner_everywhere, "public.security.cves", "WRITE", identity=identity
+        )
+
+
+def test_platform_identities_cannot_drop_or_grant_in_public():
+    # The exception is writer-tier. Nothing about being a platform identity
+    # confers the owner-tier actions on a namespace nobody owns.
+    for identity in ("federator", "xb500"):
+        for action in ("DROP", "ALTER", "GRANT", "REVOKE", "MANIFEST"):
+            assert not can_perform_action([], "public.security.cves", action, identity=identity)
+
+
 def test_implicit_personal_owner_survives_a_conflicting_reader_grant():
     # The opposite direction: an issued policy that would be *weaker* than
     # the implicit grant must not narrow it either -- implicit grants are

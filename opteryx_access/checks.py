@@ -34,6 +34,28 @@ from opteryx_access.patterns import normalize
 from opteryx_access.patterns import resource_matches
 
 
+# Identities that maintain the `public` workspace rather than merely read it:
+# the platform's own automation. `public` holds curated open data (GDELT,
+# vulnerability feeds, and the rest) that something has to load and keep
+# compacted, and `public` is a reserved workspace -- `validate_pattern` refuses
+# to write a policy over it, so this access cannot be issued as a grant no
+# matter who asks. Declared here instead, as the one place the exception is
+# stated.
+#
+# This is deliberately a short, closed list of platform identities, not a role
+# or a flag on an account: it is an exception to "public is read-only for
+# everyone", and an exception that anything could opt into would not be one.
+# Everything held here is reported by `SHOW GRANTS` for these identities (see
+# `opteryx_access.capability`), so it is at least visible where a policy row
+# would have been.
+#
+# What this rests on: whoever issues tokens must never mint one whose `sub` is
+# a name in this set for anyone but the platform. Nothing here can check that
+# -- an identity arrives already authenticated -- so these names have to be
+# unregisterable wherever accounts are created.
+PLATFORM_IDENTITIES: frozenset[str] = frozenset({"federator", "xb500"})
+
+
 def implicit_grants(identity: str | None) -> list[Grant]:
     """Grants every session holds without a policy being issued for them.
 
@@ -49,10 +71,22 @@ def implicit_grants(identity: str | None) -> list[Grant]:
 
     An anonymous session (no identity) holds no personal namespace: there is
     no `personal.<nobody>` for it to own.
+
+    A platform identity (see `PLATFORM_IDENTITIES`) holds `writer` on
+    `public.*` rather than `reader`. Writer, not owner: these identities load
+    and compact what is in `public`, and neither dropping a public dataset nor
+    granting anyone access to one is theirs to do.
     """
     grants = []
     if identity:
-        grants.append(Grant(role="owner", pattern=f"personal.{escape_glob(normalize(identity))}.*"))
+        normalized = normalize(identity)
+        grants.append(Grant(role="owner", pattern=f"personal.{escape_glob(normalized)}.*"))
+        if normalized in PLATFORM_IDENTITIES:
+            # ORDER IS LOAD-BEARING: `can_perform_action` answers from the first
+            # implicit grant whose pattern matches and does not look further, so
+            # this has to precede the reader grant below or it would never be
+            # reached.
+            grants.append(Grant(role="writer", pattern="public.*"))
     grants.append(Grant(role="reader", pattern="public.*"))
     return grants
 
@@ -75,7 +109,9 @@ def can_perform_action(
     they cover: a resource inside `public.` or inside the caller's own
     `personal.` namespace is answered there and does not fall through to
     `grants`. That is what makes `public.` read-only for everyone regardless
-    of what an issued policy might otherwise say about it.
+    of what an issued policy might otherwise say about it -- everyone except
+    the platform identities that maintain it, whose writer grant is itself one
+    of the implicit grants and so is decided in the same pass.
     """
     if resource.count(".") == 0:
         return action == "READ"

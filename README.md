@@ -121,6 +121,42 @@ Rules, all enforced by `validate_pattern`:
   reason about.
 - `public`, `personal`, and `information_schema` remain non-grantable.
 
+## Implicit grants, and the `public` exception
+
+Some access is held without a policy having been issued for it, declared once in
+`checks.implicit_grants`:
+
+| Who | Holds | Why |
+|---|---|---|
+| Any identity | `owner` on `personal.<identity>.*` | Your own namespace |
+| Everyone | `reader` on `public.*` | Shared open data, readable by all |
+| `PLATFORM_IDENTITIES` | `writer` on `public.*` | Something has to load and compact it |
+
+These are checked **before** issued grants and **cap** what they cover: a
+resource in `public.` or in your own `personal.` is answered there and never
+falls through, which is what makes `public.` read-only however broad a policy
+someone holds over it.
+
+`public` is where curated open data lives -- GDELT, vulnerability feeds -- and
+something has to write it and keep it compacted. Because `public` is a reserved
+workspace, `validate_pattern` refuses to store a policy over it, so that access
+cannot be issued as an ordinary grant to the identities that do the work. It is
+declared instead as a third implicit grant, held by a short closed list of
+platform identities (`federator`, `xb500`), ordered ahead of the reader grant it
+would otherwise be capped by.
+
+Three things worth being explicit about, since this is a carve-out:
+
+- **Writer, not owner.** These identities load and compact `public`; dropping a
+  public dataset or granting anyone access to one is not theirs to do.
+- **It is visible.** `SHOW GRANTS` reports implicit grants first, in evaluation
+  order, so a platform identity's write access over `public` is legible in the
+  same place a policy row would have been.
+- **It rests on identity issuance.** Nothing here can verify that a session
+  claiming to be `federator` is the platform -- an identity arrives already
+  authenticated. These names must be unregisterable wherever accounts are
+  created, or the carve-out is a signup form away from anyone.
+
 *Who* is a named individual, enforced by `validate_principal`. There is no
 wildcard principal and no group principal: a grant everyone holds is not
 something any listing surfaces as unusual, and groups will be their own
@@ -277,10 +313,12 @@ except AccessDeniedError:
 
 ## Behavior changes from the ported originals
 
-Ported faithfully except for four deliberate deviations. Each is stricter
-than what the originals accept, so each can reject a policy that exists
+Ported faithfully except for the deliberate deviations below. Four of them are
+stricter than what the originals accept, so each can reject a policy that exists
 today -- audit stored policies before cutting a service over, rather than
-assuming any of this is a no-op:
+assuming any of this is a no-op. Two grant *more* than the originals did
+(case-insensitive matching, and the platform identities' write access over
+`public`); both are called out as such:
 
 - **`ROLES` is `("owner", "writer", "reader")` -- three roles, not four.**
   `policy.opteryx`/`control.opteryx`'s current `ROLES`/`VALID_WORKSPACE_ROLES`
@@ -303,6 +341,13 @@ assuming any of this is a no-op:
 - **Patterns must be usable and workspace-scoped.** The originals accept any
   string, including a bare `*`, partial globs (`pub*`), and malformed input
   (`a....*.bob11`). See "Patterns and principals" above for the rules.
+- **Platform identities may write `public`. This is the second deviation that
+  grants more than the originals.** `federator` and `xb500` hold `writer` on
+  `public.*` as an implicit grant -- see "Implicit grants, and the `public`
+  exception" above for why it cannot be an ordinary policy, and what it rests
+  on. In the originals nothing could write `public` at all, which is why the
+  jobs that maintain it bypassed permission checks entirely rather than
+  clearing them.
 
 ## Suggested migration (not yet done)
 
