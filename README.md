@@ -7,6 +7,23 @@ calls it in-process against policies it already has in hand -- a JWT's
 (Firestore, today). There is no `opteryx-access` HTTP surface, and this
 package makes no network calls of its own beyond what a storage adapter does.
 
+## Scope: data access only
+
+This package models exactly one thing: who can do what to *data* --
+`owner`/`writer`/`reader` on workspaces, collections, and datasets. It has no
+notion of billing-account roles (`admin`/`member`, minted separately on a
+billing account and unrelated to data roles) and enforces no billing checks.
+
+The one place these two systems touch is **workspace genesis**: creating a
+workspace is a billing-gated action (the creator must already be a billing
+admin -- checked by whatever service owns billing, not this one), and its
+result is a data-permission fact -- the creator becomes the new workspace's
+`owner`. That handoff is the entire intersection. `opteryx_access.store.bootstrap_workspace`
+implements the data-permission half of it (an explicit list of
+`(principal, role)` pairs, `owner` among them) and knows nothing about
+billing; the billing gate is the calling service's job, enforced before
+`bootstrap_workspace` is ever reached.
+
 ## Why this exists
 
 Three independent, subtly incompatible implementations of "does this role
@@ -14,16 +31,12 @@ satisfy this requirement" already exist in the fleet:
 
 - **policy.opteryx** / **control.opteryx** (`app/routes/v1/access.py`,
   `app/models/policy.py` -- byte-for-byte duplicated between the two repos):
-  a rank-based `ROLES = ("owner", "admin", "writer", "reader")` used to
-  decide who may create/update/revoke a policy, and whether a new grant is
-  redundant against one the principal already holds.
+  a rank-based `ROLES` tuple used to decide who may create/update/revoke a
+  policy, and whether a new grant is redundant against one the principal
+  already holds.
 - **opteryx-core** (`opteryx/managers/permissions/__init__.py`): a
   set-based `ACTION_MAP` deciding which roles may `READ`/`DELETE`/`DROP`/etc.
-  a resource once a query actually runs. `admin` is deliberately absent from
-  every entry -- it never grants data access, only grant-management
-  authority. This is the piece the rank-based model above cannot replace: a
-  naive `owner > admin > writer > reader` comparison would silently hand
-  admins data-write access they've never had.
+  a resource once a query actually runs.
 - **odata.opteryx** (`app/auth/permissions.py`): a binary
   `role_allows_read` used for listing/visibility, plus its own
   `fnmatch.fnmatchcase`-based pattern matcher -- deliberately case-sensitive,
@@ -43,30 +56,35 @@ is meant to stop.
 
 | Module | Ported from | Purpose |
 |---|---|---|
-| `roles.py` | `policy.opteryx/app/models/policy.py` | The canonical `ROLES` tuple. Two separate notions of "outranks": `ADMINISTRATIVE_ROLES` (owner/admin -- may manage grants) and rank (`ROLE_RANK`, used only for conflict detection). **Not** used to decide data actions. |
+| `roles.py` | `policy.opteryx/app/models/policy.py` | The canonical `ROLES = ("owner", "writer", "reader")`, `ROLE_RANK`, and `ADMINISTRATIVE_ROLES` (`{"owner"}` -- the sole role that may manage grants). |
 | `actions.py` | `opteryx-core/opteryx/managers/permissions/__init__.py` | `ACTION_ROLES`: which roles may perform `READ`/`WRITE`/`DELETE`/`CREATE`/`DROP`/`ALTER`/`REFRESH`/`MANIFEST`, plus `GRANT`/`REVOKE` (new -- makes policy-administration authority explicit in the same table instead of an implicit rule elsewhere). |
 | `patterns.py` | `policy.opteryx/app/models/policy.py` + `app/routes/v1/access.py` | `resource_matches` (case-sensitive `fnmatchcase` -- see "Behavior changes" below), the wildcard-principal rule, and the reserved-workspace (`public`/`personal`/`information_schema`) rule. |
 | `models.py` | `authenticate.opteryx/app/policies.py` | `Grant` (role+pattern, the JWT-carried shape) and `Policy` (principal+role+pattern+metadata, the stored shape), plus `parse_policy_claim` for the `[role, pattern]` pairs a token carries. |
-| `checks.py` | `opteryx-core`'s `can_perform_action`/`can_perform_workspace_action` + `policy.opteryx`'s `_check_pattern_access`/`_check_workspace_access`/`_check_workspace_owner_access` | The evaluation layer: data-plane checks over `Grant`s, administrative-plane checks over `Policy` documents. |
-| `store.py` | `policy.opteryx/app/routes/v1/access.py`'s `create_policy`/`update_policy`/`delete_policy`/`create_genesis_policies` | Where policies are actually granted, updated, and revoked: the `PolicyStore` protocol plus `grant()`/`update_grant()`/`revoke()`/`bootstrap_workspace()`, which enforce every invariant those routes did (self-grant prevention, pattern-authority, conflict detection, wildcard/reserved-resource validation) against any storage backend. |
+| `checks.py` | `opteryx-core`'s `can_perform_action`/`can_perform_workspace_action` + `policy.opteryx`'s `_check_pattern_access`/`_check_workspace_access` | The evaluation layer: data-plane checks over `Grant`s, administrative-plane checks over `Policy` documents. |
+| `store.py` | `policy.opteryx/app/routes/v1/access.py`'s `create_policy`/`update_policy`/`delete_policy`/`create_genesis_policies` | Where policies are actually granted, updated, and revoked: the `PolicyStore` protocol plus `grant()`/`update_grant()`/`revoke()`/`bootstrap_workspace()`, which enforce every invariant those routes did (self-grant prevention, pattern-authority, conflict detection, wildcard/reserved-resource validation) against any storage backend. Also `grants_for_principal()` -- the read side: fetches and converts a `PolicyStore`'s issued grants for one identity into the `Grant` list `checks.py`'s data-plane functions expect. |
 | `adapters/firestore.py` | (new) | `FirestorePolicyStore`, matching the `{workspace}/$policies/access` layout policy.opteryx/control.opteryx already write to -- a drop-in for their inline Firestore calls. |
 | `exceptions.py` | (new) | Plain exceptions (`SelfAccessError`, `AccessDeniedError`, `PolicyConflictError`, ...) instead of `HTTPException` -- each caller translates to its own transport. |
 
-## Two axes, not one rank
+## Two questions, not one
 
-`admin` sits between `owner` and `writer` on the grant-management axis
-(`ADMINISTRATIVE_ROLES`) but is excluded from every entry in `ACTION_ROLES`.
-That split is real, existing platform behavior (see opteryx-core's
-`ACTION_MAP`), not an oversight this library introduces -- an admin can grant
-and revoke other people's access but cannot themselves `SELECT`/`INSERT`/
-`DELETE` against a resource they don't separately hold `writer`/`owner` on.
-Anything built on top of this package should keep asking the right one of
-the two questions:
-
-- "May this identity administer grants on this pattern?" -> `checks.can_administer_pattern`
-- "May this role perform this SQL-shaped action on this resource?" -> `checks.can_perform_action`
+"May this identity administer grants on this pattern?" (`checks.can_administer_pattern`,
+owner-only) and "may this role perform this SQL-shaped action on this
+resource?" (`checks.can_perform_action`, owner/writer/reader per
+`ACTION_ROLES`) are different questions over different inputs (`Policy` vs.
+`Grant`) -- keep asking the one that actually applies rather than reusing
+one function's answer for the other.
 
 ## Usage
+
+Every check function takes grants/policies already in hand -- it doesn't
+fetch them itself. Where those come from depends on what you're holding:
+
+- **A JWT**: `opteryx_access.models.parse_policy_claim(claims)` -- the token
+  was already scoped to its own holder when it was minted, so nothing more
+  to filter.
+- **A `PolicyStore`** (live policy state, not a token): `opteryx_access.store.grants_for_principal(store, workspace=..., identity=...)`
+  -- fetches that identity's issued grants and converts them to the same
+  `Grant` shape.
 
 ```python
 from opteryx_access import Grant, can_perform_action
@@ -74,6 +92,15 @@ from opteryx_access import Grant, can_perform_action
 grants = [Grant(role="writer", pattern="analytics.sales.*")]
 can_perform_action(grants, "analytics.sales.q1", "DELETE")  # True
 can_perform_action(grants, "analytics.sales.q1", "DROP")    # False -- writer, not owner
+```
+
+```python
+from opteryx_access.store import grants_for_principal
+from opteryx_access.adapters.firestore import FirestorePolicyStore
+
+store = FirestorePolicyStore(db)
+grants = grants_for_principal(store, workspace="analytics", identity="bob")
+can_perform_action(grants, "analytics.sales.q1", "DELETE")
 ```
 
 ```python
@@ -92,9 +119,15 @@ except AccessDeniedError:
 
 ## Behavior changes from the ported originals
 
-Ported faithfully except for one deliberate fix, worth calling out before
-anything is cut over:
+Ported faithfully except for two deliberate deviations, worth calling out
+before anything is cut over:
 
+- **`ROLES` is `("owner", "writer", "reader")` -- three roles, not four.**
+  `policy.opteryx`/`control.opteryx`'s current `ROLES`/`VALID_WORKSPACE_ROLES`
+  include a fourth, `admin`. This package intentionally drops it: `admin` is
+  a billing-account concept, not a data-permission one (see "Scope" above),
+  and never belonged in the data-role vocabulary. See the migration note
+  below for what this means for any already-issued `role: "admin"` policy.
 - **`resource_matches` uses `fnmatch.fnmatchcase`, not `fnmatch.fnmatch`.**
   `policy.opteryx`/`control.opteryx`/opteryx-core's data-action check all use
   plain `fnmatch`, which folds case per the OS Python runs on -- the same
@@ -110,6 +143,19 @@ anything is cut over:
 ## Suggested migration (not yet done)
 
 This repo is the library only -- nothing outside it has been changed yet.
+
+**Before step 3**: `policy.opteryx`/`control.opteryx`'s *current, deployed*
+`ROLES`/`VALID_WORKSPACE_ROLES` still include `admin` as a fourth, live,
+grantable role -- this package deliberately does not. If any workspace has an
+existing policy document with `role: "admin"`, cutting that service over to
+`opteryx_access` makes that document unrecognized (`is_valid_role("admin")`
+is `False`, `can_administer_pattern`/`can_perform_action` treat it as no
+authority at all -- see `test_admin_role_cannot_grant_anything` and
+`test_admin_grant_permits_nothing`). Audit for `role: "admin"` documents
+under `*/$policies/access` before that cutover and decide what happens to
+them (revoke, or migrate to `owner`) -- this package does not do that
+migration for you.
+
 Suggested order, each independently shippable:
 
 1. **opteryx-core**: replace `opteryx/managers/permissions/__init__.py`'s

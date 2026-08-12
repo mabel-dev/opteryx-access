@@ -4,20 +4,19 @@ from opteryx_access.actions import allowed_roles
 from opteryx_access.roles import ROLES
 
 
-def test_admin_excluded_from_every_data_action():
-    # admin is an administrative (grant-management) tier, not a data-access
-    # tier -- see opteryx_access.roles. Confirm no data action was accidentally
-    # opened up to admin.
-    data_actions = set(ACTION_ROLES) - {"GRANT", "REVOKE"}
-    for action in data_actions:
-        assert "admin" not in ACTION_ROLES[action], action
+def test_admin_is_excluded_from_every_action():
+    # "admin" isn't a role in this package at all (see opteryx_access.roles) --
+    # confirm a stray "admin" string never grants anything, data or
+    # administrative.
+    for action in ACTION_ROLES:
+        assert not action_allowed_for_role("admin", action), action
 
 
-def test_admin_and_owner_may_grant_and_revoke():
-    assert action_allowed_for_role("admin", "GRANT")
+def test_only_owner_may_grant_and_revoke():
     assert action_allowed_for_role("owner", "GRANT")
-    assert action_allowed_for_role("admin", "REVOKE")
+    assert action_allowed_for_role("owner", "REVOKE")
     assert not action_allowed_for_role("writer", "GRANT")
+    assert not action_allowed_for_role("reader", "GRANT")
 
 
 def test_drop_and_alter_are_owner_only():
@@ -37,9 +36,7 @@ def test_unknown_action_permits_nobody():
         assert not action_allowed_for_role(role, "TRUNCATE")
 
 
-def test_every_action_role_is_a_recognized_role_or_administrative():
-    from opteryx_access.roles import ADMINISTRATIVE_ROLES
-
+def test_every_action_role_is_a_recognized_role():
     for action, roles in ACTION_ROLES.items():
         for role in roles:
-            assert role in ROLES or role in ADMINISTRATIVE_ROLES, (action, role)
+            assert role in ROLES, (action, role)

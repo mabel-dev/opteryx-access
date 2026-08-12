@@ -34,6 +34,7 @@ from opteryx_access.exceptions import PolicyConflictError
 from opteryx_access.exceptions import PolicyNotFoundError
 from opteryx_access.exceptions import SelfAccessError
 from opteryx_access.exceptions import WorkspaceAlreadyBootstrappedError
+from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.patterns import WILDCARD_PRINCIPAL
 from opteryx_access.patterns import resource_matches
@@ -75,6 +76,32 @@ class PolicyStore(Protocol):
 def _validate_role(role: str) -> None:
     if role not in ROLES:
         raise InvalidRoleError(f"invalid role {role!r}, must be one of: {', '.join(ROLES)}")
+
+
+def grants_for_principal(store: PolicyStore, *, workspace: str, identity: str) -> list[Grant]:
+    """The issued grants that apply to `identity` in `workspace`, ready to
+    pass to `opteryx_access.checks.can_perform_action`/`can_perform_workspace_action`.
+
+    Every policy in the store whose principal is `identity` or the wildcard
+    `"*"`, converted to `Grant` (dropping principal and storage metadata).
+    This is the store-backed counterpart to `opteryx_access.models.parse_policy_claim`:
+    a JWT's `policies` claim already arrives scoped to its own holder, minted
+    that way by whatever issued the token, so there is nothing to filter
+    there -- a caller working from live policy state instead of a token has
+    no equivalent step of its own, which is what this fills in.
+
+    Deliberately does NOT include `opteryx_access.checks.implicit_grants` --
+    those are layered on by the check functions themselves regardless of
+    where the issued grants came from. Adding them here too would just be
+    redundant, but it would also break parity: `parse_policy_claim` never
+    includes them either, so keeping both fetch paths return exactly the
+    issued grants keeps them interchangeable.
+    """
+    return [
+        policy.as_grant()
+        for policy in store.list_policies(workspace)
+        if policy.principal in (identity, WILDCARD_PRINCIPAL)
+    ]
 
 
 def find_conflict(
@@ -139,8 +166,8 @@ def grant(
             targets a reserved resource.
         SelfAccessError: `actor == principal` -- nobody may grant themselves
             access, regardless of what authority they otherwise hold; ask
-            another owner/admin to do it.
-        AccessDeniedError: `actor` lacks owner/admin authority covering
+            another owner to do it.
+        AccessDeniedError: `actor` lacks owner authority covering
             `pattern` (see `opteryx_access.checks.can_administer_pattern`).
         PolicyConflictError: see `find_conflict`.
     """
@@ -149,9 +176,7 @@ def grant(
     validate_pattern_does_not_target_reserved_resource(pattern)
 
     if principal == actor:
-        raise SelfAccessError(
-            "you cannot grant yourself access; ask another owner or admin to do it"
-        )
+        raise SelfAccessError("you cannot grant yourself access; ask another owner to do it")
 
     existing = store.list_policies(workspace)
 
@@ -186,7 +211,7 @@ def update_grant(
         PolicyNotFoundError, InvalidRoleError, InvalidPatternError: as above.
         SelfAccessError: the policy belongs to `actor` -- nobody may modify
             their own access.
-        AccessDeniedError: `actor` lacks owner/admin authority covering
+        AccessDeniedError: `actor` lacks owner authority covering
             EITHER the policy's current pattern or the requested new one --
             otherwise a grantor could edit a policy scoped to a pattern they
             don't govern, or use the edit to move it under one they don't.
@@ -198,9 +223,7 @@ def update_grant(
         raise PolicyNotFoundError(f"policy {policy_id!r} not found in workspace {workspace!r}")
 
     if existing_policy.principal == actor:
-        raise SelfAccessError(
-            "you cannot modify your own access; ask another owner or admin to do it"
-        )
+        raise SelfAccessError("you cannot modify your own access; ask another owner to do it")
 
     all_policies = store.list_policies(workspace)
     if not can_administer_pattern(
@@ -221,7 +244,7 @@ def revoke(store: PolicyStore, *, actor: str, workspace: str, policy_id: str) ->
         PolicyNotFoundError: no such policy.
         SelfAccessError: the policy belongs to `actor` -- nobody may revoke
             their own access.
-        AccessDeniedError: `actor` lacks owner/admin authority covering the
+        AccessDeniedError: `actor` lacks owner authority covering the
             policy's pattern -- not just anywhere in the workspace.
     """
     existing_policy = store.get_policy(workspace, policy_id)
@@ -229,9 +252,7 @@ def revoke(store: PolicyStore, *, actor: str, workspace: str, policy_id: str) ->
         raise PolicyNotFoundError(f"policy {policy_id!r} not found in workspace {workspace!r}")
 
     if existing_policy.principal == actor:
-        raise SelfAccessError(
-            "you cannot revoke your own access; ask another owner or admin to do it"
-        )
+        raise SelfAccessError("you cannot revoke your own access; ask another owner to do it")
 
     all_policies = store.list_policies(workspace)
     if not can_administer_pattern(all_policies, actor, existing_policy.pattern):

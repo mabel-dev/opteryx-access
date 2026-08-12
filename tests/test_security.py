@@ -50,12 +50,12 @@ def test_no_role_can_perform_an_action_it_is_not_explicitly_listed_for():
 
 
 def test_cannot_grant_a_broader_pattern_than_you_administer():
-    # Holding admin on the narrow "analytics.sales.*" must not let you mint a
-    # grant on the broader "analytics.*" -- that would let a scoped admin
+    # Holding owner on the narrow "analytics.sales.*" must not let you mint a
+    # grant on the broader "analytics.*" -- that would let a scoped owner
     # silently widen their own effective reach by handing the broad pattern
     # to an accomplice (or to themselves under a second identity).
     store = FakePolicyStore()
-    store.seed("analytics", Policy(principal="alice", role="admin", pattern="analytics.sales.*"))
+    store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.sales.*"))
     with pytest.raises(AccessDeniedError):
         grant(
             store,
@@ -209,17 +209,34 @@ def test_implicit_grant_prefix_match_does_not_leak_across_identities():
 
 
 # ---------------------------------------------------------------------------
-# Known, intentional platform behavior worth pinning explicitly rather than
-# leaving as an unstated assumption: admin's grant-management authority lets
-# it grant *any* role, including owner, to a third party. This mirrors the
-# pre-existing policy.opteryx/control.opteryx routes this was ported from --
-# not a new capability introduced here.
+# "admin" is not a role this package recognizes at all (it belongs
+# exclusively to billing_role -- see roles.py). A stray "admin" value must be
+# inert everywhere permissions are actually enforced, not just excluded from
+# some subset of actions.
 # ---------------------------------------------------------------------------
 
 
-def test_admin_may_grant_owner_to_a_third_party():
+def test_admin_role_cannot_grant_anything():
     store = FakePolicyStore()
     store.seed("analytics", Policy(principal="alice", role="admin", pattern="analytics.*"))
+    with pytest.raises(AccessDeniedError):
+        grant(
+            store,
+            actor="alice",
+            workspace="analytics",
+            principal="bob",
+            role="reader",
+            pattern="analytics.sales.*",
+        )
+
+
+def test_owner_may_grant_owner_to_a_third_party():
+    # Known, intentional platform behavior worth pinning explicitly: owner's
+    # grant-management authority lets it grant *any* role, including owner,
+    # to a third party -- there is no rule limiting a grant to at most the
+    # actor's own role.
+    store = FakePolicyStore()
+    store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
     policy_id = grant(
         store,
         actor="alice",

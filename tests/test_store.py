@@ -8,10 +8,12 @@ from opteryx_access.exceptions import PolicyConflictError
 from opteryx_access.exceptions import PolicyNotFoundError
 from opteryx_access.exceptions import SelfAccessError
 from opteryx_access.exceptions import WorkspaceAlreadyBootstrappedError
+from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.store import bootstrap_workspace
 from opteryx_access.store import find_conflict
 from opteryx_access.store import grant
+from opteryx_access.store import grants_for_principal
 from opteryx_access.store import revoke
 from opteryx_access.store import update_grant
 
@@ -47,6 +49,21 @@ def test_grant_rejects_invalid_role():
             workspace="analytics",
             principal="bob",
             role="superadmin",
+            pattern="analytics.sales.*",
+        )
+
+
+def test_grant_rejects_admin_as_invalid_role():
+    # "admin" specifically -- the realistic value a not-yet-cut-over caller
+    # might still pass, not just an arbitrary bad string.
+    store = _owner_store()
+    with pytest.raises(InvalidRoleError):
+        grant(
+            store,
+            actor="alice",
+            workspace="analytics",
+            principal="bob",
+            role="admin",
             pattern="analytics.sales.*",
         )
 
@@ -223,7 +240,7 @@ def test_update_grant_rejects_self_modify():
             actor="alice",
             workspace="analytics",
             policy_id=policy_id,
-            role="admin",
+            role="writer",
             pattern="analytics.*",
         )
 
@@ -281,12 +298,18 @@ def test_update_grant_preserves_wildcard_rule_against_stored_principal():
 def test_bootstrap_workspace_creates_scoped_grants():
     store = FakePolicyStore()
     ids = bootstrap_workspace(
-        store, actor="alice", workspace="newspace", grants=[("alice", "owner"), ("bob", "admin")]
+        store, actor="alice", workspace="newspace", grants=[("alice", "owner"), ("bob", "writer")]
     )
     assert len(ids) == 2
     policies = store.list_policies("newspace")
     assert {p.principal for p in policies} == {"alice", "bob"}
     assert all(p.pattern == "newspace.*" for p in policies)
+
+
+def test_bootstrap_workspace_rejects_admin_as_invalid_role():
+    store = FakePolicyStore()
+    with pytest.raises(InvalidRoleError):
+        bootstrap_workspace(store, actor="alice", workspace="newspace", grants=[("bob", "admin")])
 
 
 def test_bootstrap_workspace_refuses_if_already_bootstrapped():
@@ -299,3 +322,54 @@ def test_bootstrap_workspace_rejects_reserved_workspace():
     store = FakePolicyStore()
     with pytest.raises(InvalidPatternError):
         bootstrap_workspace(store, actor="alice", workspace="public", grants=[("alice", "owner")])
+
+
+def test_grants_for_principal_returns_only_the_matching_identity():
+    store = FakePolicyStore()
+    store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.sales.*"))
+    assert grants_for_principal(store, workspace="analytics", identity="bob") == [
+        Grant(role="writer", pattern="analytics.sales.*")
+    ]
+
+
+def test_grants_for_principal_includes_wildcard_principal_grants():
+    store = FakePolicyStore()
+    store.seed("analytics", Policy(principal="*", role="reader", pattern="analytics.dashboard"))
+    store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
+    assert grants_for_principal(store, workspace="analytics", identity="bob") == [
+        Grant(role="reader", pattern="analytics.dashboard")
+    ]
+
+
+def test_grants_for_principal_drops_principal_and_metadata():
+    store = FakePolicyStore()
+    store.seed(
+        "analytics",
+        Policy(principal="bob", role="writer", pattern="analytics.sales.*", updated_by="alice"),
+    )
+    [only] = grants_for_principal(store, workspace="analytics", identity="bob")
+    assert only == Grant(role="writer", pattern="analytics.sales.*")
+
+
+def test_grants_for_principal_empty_when_nothing_matches():
+    store = FakePolicyStore()
+    store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
+    assert grants_for_principal(store, workspace="analytics", identity="bob") == []
+
+
+def test_grants_for_principal_empty_workspace():
+    store = FakePolicyStore()
+    assert grants_for_principal(store, workspace="analytics", identity="bob") == []
+
+
+def test_grants_for_principal_is_ready_to_pass_to_can_perform_action():
+    # The point of this function: its output is directly usable by the
+    # data-plane checks, no further conversion needed.
+    from opteryx_access.checks import can_perform_action
+
+    store = FakePolicyStore()
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.sales.*"))
+    grants = grants_for_principal(store, workspace="analytics", identity="bob")
+    assert can_perform_action(grants, "analytics.sales.q1", "DELETE")
+    assert not can_perform_action(grants, "analytics.sales.q1", "DROP")

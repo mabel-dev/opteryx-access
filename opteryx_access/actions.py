@@ -6,11 +6,12 @@ owner", etc. -- ported from opteryx-core's `opteryx.managers.permissions.ACTION_
 policy-administration actions this package itself exposes (see `opteryx_access.store`)
 are declared in the same table instead of living as an implicit rule elsewhere.
 
-Deliberately a `{action: set-of-roles}` map, not a minimum-rank comparison:
-`admin` sits between `owner` and `writer` on the *administrative* rank in
-`opteryx_access.roles`, but is excluded from every data action below on
-purpose -- see that module's docstring. A rank-based `role_at_least` check
-here would silently hand admins data access they've never had.
+Deliberately a `{action: set-of-roles}` map, not a minimum-rank comparison,
+even though every entry today happens to be "top N roles by rank" and so
+could be read as one. Rank is a data-role-only concept (owner > writer >
+reader); an explicit per-action set stays correct if a future action's
+requirement doesn't nest that way, and it keeps each action's requirement
+self-documenting at its own definition rather than inferred from a number.
 """
 
 from opteryx_access.roles import ADMINISTRATIVE_ROLES
@@ -37,9 +38,8 @@ ACTION_ROLES = {
     # SHOW MANIFEST FOR exposes file paths and layout (bucket/partition
     # structure), not just data -- stricter than a normal READ.
     "MANIFEST": {"owner"},
-    # Policy administration: creating, updating, or revoking a grant. This is
-    # the ADMINISTRATIVE_ROLES tier (owner or admin), not the data-action
-    # tier -- see the module docstring.
+    # Policy administration: creating, updating, or revoking a grant.
+    # Owner-only, same as ADMINISTRATIVE_ROLES.
     "GRANT": set(ADMINISTRATIVE_ROLES),
     "REVOKE": set(ADMINISTRATIVE_ROLES),
 }

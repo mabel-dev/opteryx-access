@@ -2,7 +2,6 @@ from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
 from opteryx_access.checks import has_workspace_access
-from opteryx_access.checks import has_workspace_owner_access
 from opteryx_access.checks import implicit_grants
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
@@ -19,8 +18,9 @@ def test_writer_grant_permits_delete_not_drop():
     assert not can_perform_action(grants, "analytics.sales.q1", "DROP")
 
 
-def test_admin_grant_does_not_permit_data_actions():
-    # admin is a grant-management tier, not a data-access tier -- see roles.py.
+def test_admin_grant_permits_nothing():
+    # "admin" isn't a role in this package at all (see roles.py) -- a grant
+    # carrying it must be inert, not just excluded from some actions.
     grants = [Grant(role="admin", pattern="analytics.*")]
     assert not can_perform_action(grants, "analytics.sales.q1", "READ")
     assert not can_perform_action(grants, "analytics.sales.q1", "DELETE")
@@ -82,6 +82,11 @@ def test_can_administer_pattern_no_policies_denied():
     assert not can_administer_pattern([], "alice", "analytics.*")
 
 
+def test_has_workspace_access_owner_grants_access():
+    policies = [Policy(principal="alice", role="owner", pattern="analytics.*")]
+    assert has_workspace_access(policies, "alice")
+
+
 def test_has_workspace_access_no_matching_policy_denied():
     policies = [Policy(principal="bob", role="owner", pattern="analytics.*")]
     assert not has_workspace_access(policies, "alice")
@@ -105,14 +110,18 @@ def test_can_administer_pattern_writer_is_insufficient():
 
 
 def test_wildcard_principal_policy_grants_administer_to_everyone():
-    policies = [Policy(principal="*", role="admin", pattern="analytics.public.*")]
+    policies = [Policy(principal="*", role="owner", pattern="analytics.public.*")]
     assert can_administer_pattern(policies, "anyone", "analytics.public.dashboard")
 
 
-def test_has_workspace_access_vs_owner_access():
+def test_can_administer_pattern_admin_role_is_insufficient():
+    # A stray "admin" (e.g. leftover from a caller that hasn't cut over off
+    # the old four-role model) must not carry administrative authority --
+    # only "owner" does now.
     policies = [Policy(principal="alice", role="admin", pattern="analytics.*")]
-    assert has_workspace_access(policies, "alice")
-    assert not has_workspace_owner_access(policies, "alice")
+    assert not can_administer_pattern(policies, "alice", "analytics.sales.*")
 
-    owner_policies = [Policy(principal="bob", role="owner", pattern="analytics.*")]
-    assert has_workspace_owner_access(owner_policies, "bob")
+
+def test_has_workspace_access_admin_role_is_insufficient():
+    policies = [Policy(principal="alice", role="admin", pattern="analytics.*")]
+    assert not has_workspace_access(policies, "alice")
