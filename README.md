@@ -65,6 +65,7 @@ is meant to stop.
 | `grants.py` | `policy.opteryx/app/routes/v1/access.py`'s `create_policy`/`update_policy`/`delete_policy`/`create_genesis_policies` | The write half: `grant()`/`update_grant()`/`revoke()`/`bootstrap_workspace()`, enforcing every rule those routes did (self-grant prevention, pattern authority, conflict detection, principal and pattern validation) before calling a store. Also the two reads that need a store: `grants_for_principal()` and `owned_by()`. |
 | `store.py` | (new) | The `PolicyStore` protocol: the storage contract, and nothing else. No rules live here -- see "Layering" below. |
 | `audit.py` | `policy.opteryx/app/routes/v1/access.py`'s `_audit_policy_change` | One structured record per policy change, on the same field contract the existing log transforms already parse -- see "Audit records" below. |
+| `capability.py` | (new) | The permissions capability opteryx-core registers -- the one module that knows the engine exists. See "The opteryx-core capability" below. |
 | `adapters/firestore.py` | (new) | `FirestorePolicyStore`, matching the `{workspace}/$policies/access` layout policy.opteryx/control.opteryx already write to -- a drop-in for their inline Firestore calls. |
 | `exceptions.py` | (new) | Plain exceptions (`SelfAccessError`, `AccessDeniedError`, `PolicyConflictError`, ...) instead of `HTTPException` -- each caller translates to its own transport. |
 
@@ -100,8 +101,14 @@ Two consequences worth relying on:
 A policy says **who** gets **what role** over **which resources**.
 
 *Which resources* is a pattern: `workspace[.collection[.dataset]]`, where each
-dot-separated segment is either a literal name or `*` standing for any one
-segment. Rules, all enforced by `validate_pattern`:
+dot-separated segment written is either a literal name or `*`.
+
+**A `*` covers everything below it, not one level.** `analytics.*` grants
+`analytics.sales` and `analytics.sales.q1` alike -- a grant over a workspace is
+a grant over what is in it. Worth stating plainly, because reading `*` as "one
+segment" understates what a policy confers.
+
+Rules, all enforced by `validate_pattern`:
 
 - **Names are lowercase**, `a-z0-9_`, starting with a letter. Patterns and
   resource names are normalized before they are compared, so matching is
@@ -177,6 +184,41 @@ role plus pattern, all a data action needs; a `Policy` also names the
 principal it was issued to, which is what an administrative check reasons
 about. Call the one that fits the question -- neither answer substitutes for
 the other.
+
+## The opteryx-core capability
+
+opteryx-core allows everything on its own: a CLI or embedded engine has no
+workspaces to own and no policy service to have issued anything, so access
+control is a property of a deployment rather than of the engine. A deployment
+installs this library over that intrinsic default at start-up:
+
+```python
+import opteryx
+import opteryx_access
+
+opteryx.register_permissions_capability(opteryx_access.capability())
+```
+
+From then on the engine's permission gates and its `SHOW GRANTS` are both
+answered from here, so what it enforces and what it reports come from one
+evaluation.
+
+`opteryx_access.capability` is the **only** module in this package that knows
+opteryx-core exists, and even it does not import it -- the engine hands over
+an execution context and the adapter reads two attributes off it. Neither
+package depends on the other; a deployment brings them together. That is what
+keeps opteryx-core's zero-dependency contract intact, and it means the whole
+extent of the coupling can be read in one file.
+
+Two things it deliberately does not report through `SHOW GRANTS`:
+
+- **`GRANT`/`REVOKE`** (`actions.POLICY_ADMINISTRATION_ACTIONS`). They are
+  real actions this package decides, but no SQL statement in opteryx performs
+  them, so naming them in the engine's output would advertise a capability
+  its surface does not have. Only `actions.DATA_ACTIONS` are reported.
+- **Registration is start-up only.** opteryx-core refuses a capability
+  registered after a permission check has already been answered, rather than
+  let one process decide the same question two ways.
 
 ## Usage
 
@@ -301,12 +343,34 @@ semantics.
 
 Suggested order, each independently shippable:
 
-1. **opteryx-core**: replace `opteryx/managers/permissions/__init__.py`'s
-   `ACTION_MAP`/`can_perform_action`/`can_perform_workspace_action`/
-   `implicit_policies` with thin wrappers around `opteryx_access.actions`/
-   `opteryx_access.checks` (converting `ExecutionContext.access_policies`
-   dicts to `Grant`s at the boundary). Zero new dependencies -- this package
-   has none by default.
+1. **opteryx-core**: add a *permissions capability* seam rather than
+   rewriting the engine's checks. `opteryx/managers/permissions/` keeps
+   `can_perform_action` and `can_perform_workspace_action` as module-level
+   functions, but they delegate to whichever capability is registered, so all
+   28 existing call sites (21 in the binder, 7 in `information_schema`) stay
+   as they are. The engine ships an intrinsic default that allows every
+   action on every resource, and a deployment injects this library over it:
+
+   ```python
+   opteryx.register_permissions_capability(opteryx_access.capability())
+   ```
+
+   `ACTION_MAP` and `implicit_policies` leave the engine entirely. `public`
+   and `personal` are cloud-deployment namespaces -- meaningless to CLI and
+   embedded opteryx, which has no workspace service to have issued them --
+   so they belong to the capability, not to the engine's intrinsic
+   behaviour. `ACTION_ROLES` and `implicit_grants` already hold both here.
+
+   This keeps opteryx-core's zero-dependency contract intact: the engine
+   defines the interface and the default and never imports `opteryx_access`;
+   the deploying service wires the two together, exactly as it already does
+   for `opteryx-catalog` via `set_default_connector(..., catalog=...)`.
+
+   The adapter this needs is `opteryx_access.capability` -- **done**; see
+   "The opteryx-core capability" below.
+
+   Both packages support Python 3.11+, so a deployment can run them together
+   on any version opteryx-core supports.
 2. **odata.opteryx**: replace `app/auth/permissions.py`'s
    `role_allows_read`/`read_grant_for_relation`/pattern matching with
    `opteryx_access.checks.can_perform_action` (action="READ"). Leaves
@@ -344,7 +408,7 @@ requires it -- consistent with opteryx-core's zero-dependency convention.
 
 ## CI/CD
 
-- `.github/workflows/tests.yaml` -- pytest (3.13, 3.14) + ruff lint/format,
+- `.github/workflows/tests.yaml` -- pytest (3.11-3.14) + ruff lint/format,
   on every push to `main` and every PR.
 - `.github/workflows/release.yaml` -- on a pushed tag matching `version-*`:
   runs the full test workflow, checks the tag matches `pyproject.toml`'s

@@ -1,10 +1,14 @@
 """Resource patterns: what they may look like, and how they match.
 
 A pattern names data as `workspace[.collection[.dataset[...]]]`. Segments are
-dot-separated, and each is either a literal name or `*` standing for any one
-segment. The workspace segment must always be literal: a policy has to say
-which workspace it applies to, so there is no such thing as a grant over
-everything.
+dot-separated, and each one written is either a literal name or `*`. The
+workspace segment must always be literal: a policy has to say which workspace
+it applies to, so there is no such thing as a grant over everything.
+
+A `*` matches EVERYTHING BELOW IT, not one segment: `analytics.*` covers
+`analytics.sales` and `analytics.sales.q1` alike. That is the intent -- a
+grant over a workspace is a grant over what is in it -- but it means a pattern
+is a subtree, and reading `*` as "one level" understates what a policy confers.
 
 Names are lowercase. Patterns are normalized when validated and both sides
 are normalized again when matched, so matching is case-insensitive and

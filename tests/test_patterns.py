@@ -137,3 +137,38 @@ def test_is_literal_segment():
     assert not is_literal_segment("*")
     assert not is_literal_segment(None)
     assert not is_literal_segment("")
+
+
+# --- what a `*` actually covers
+#
+# The shape rule (a segment is `*` or a literal name) and the matching rule are
+# different things, and conflating them understates a grant: `*` matches across
+# dots, so a pattern is a subtree, not a level.
+
+
+def test_a_wildcard_covers_every_level_below_it_not_just_one():
+    assert resource_matches("analytics.sales", "analytics.*")
+    assert resource_matches("analytics.sales.q1", "analytics.*")
+    assert resource_matches("analytics.sales.q1.part", "analytics.*")
+
+
+def test_a_wildcard_does_not_escape_the_workspace_it_names():
+    assert not resource_matches("billing.sales.q1", "analytics.*")
+    assert not resource_matches("analytics2.sales", "analytics.*")
+
+
+def test_a_trailing_wildcard_does_not_match_the_bare_workspace():
+    # `analytics.*` covers what is IN analytics; the workspace itself is a
+    # workspace-level question -- see checks.can_perform_workspace_action.
+    assert not resource_matches("analytics", "analytics.*")
+
+
+def test_a_mid_pattern_wildcard_also_crosses_dots():
+    assert resource_matches("analytics.sales.q1", "analytics.*.q1")
+    assert resource_matches("analytics.a.b.q1", "analytics.*.q1")
+
+
+def test_a_fully_literal_pattern_matches_only_itself():
+    assert resource_matches("analytics.sales.q1", "analytics.sales.q1")
+    assert not resource_matches("analytics.sales.q1x", "analytics.sales.q1")
+    assert not resource_matches("analytics.sales", "analytics.sales.q1")

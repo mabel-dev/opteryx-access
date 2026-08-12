@@ -41,6 +41,16 @@ ACTION_ROLES = {
     "REVOKE": {"owner"},
 }
 
+# The actions that administer policy rather than touch data. Named here, next
+# to the table, so a consumer that only handles one kind can say which it
+# means instead of restating the pair -- see `opteryx_access.capability`, where
+# the query engine reports the data actions and not these (it has no GRANT or
+# REVOKE statement to offer).
+POLICY_ADMINISTRATION_ACTIONS: frozenset[str] = frozenset({"GRANT", "REVOKE"})
+
+# Everything else: the actions a query engine can be asked to perform.
+DATA_ACTIONS: frozenset[str] = frozenset(ACTION_ROLES) - POLICY_ADMINISTRATION_ACTIONS
+
 
 def allowed_roles(action: str) -> frozenset[str]:
     """The set of roles that may perform `action`. Empty if unrecognized."""

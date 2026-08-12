@@ -30,10 +30,14 @@ which implements each over the input it needs.
 """
 
 from opteryx_access.actions import ACTION_ROLES
+from opteryx_access.actions import DATA_ACTIONS
+from opteryx_access.actions import POLICY_ADMINISTRATION_ACTIONS
 from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.actions import allowed_roles
 from opteryx_access.audit import AUDIT_LOGGER_NAME
 from opteryx_access.audit import set_audit_sink
+from opteryx_access.capability import PermissionsCapability
+from opteryx_access.capability import capability
 from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
@@ -69,6 +73,8 @@ from opteryx_access.store import PolicyStore
 __all__ = [
     "ACTION_ROLES",
     "AUDIT_LOGGER_NAME",
+    "DATA_ACTIONS",
+    "POLICY_ADMINISTRATION_ACTIONS",
     "RESERVED_WORKSPACES",
     "ROLES",
     "AccessDeniedError",
@@ -76,6 +82,7 @@ __all__ = [
     "InvalidPatternError",
     "InvalidRoleError",
     "OpteryxAccessError",
+    "PermissionsCapability",
     "Policy",
     "PolicyConflictError",
     "PolicyNotFoundError",
@@ -88,6 +95,7 @@ __all__ = [
     "can_administer_pattern",
     "can_perform_action",
     "can_perform_workspace_action",
+    "capability",
     "find_conflict",
     "grant",
     "grants_for_principal",

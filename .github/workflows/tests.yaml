@@ -24,7 +24,7 @@ jobs:
       # Don't let one version failing hide the result on the others.
       fail-fast: false
       matrix:
-        python-version: ["3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
     - uses: actions/checkout@v4
