@@ -189,6 +189,24 @@ def test_a_principal_keeps_their_implicit_grants():
     assert not cap.can_principal_perform_action("ginny", "personal.alice.scratch", "READ")
 
 
+def test_each_resources_own_workspace_decides_the_lookup():
+    """Grants are per-workspace, so the workspace is taken from the resource
+    being asked about rather than from wherever the caller happens to be.
+
+    This is what lets one statement ask about sources in several workspaces and
+    get each judged against the policies that actually govern it.
+    """
+    store = FakePolicyStore()
+    store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.*"))
+    store.seed("billing", Policy(principal="alice", role="reader", pattern="billing.*"))
+    cap = capability(store)
+
+    assert cap.can_principal_perform_action("ginny", "analytics.sales.q1", "READ")
+    assert not cap.can_principal_perform_action("ginny", "billing.invoices.q1", "READ")
+    assert cap.can_principal_perform_action("alice", "billing.invoices.q1", "READ")
+    assert not cap.can_principal_perform_action("alice", "analytics.sales.q1", "READ")
+
+
 def test_a_principal_is_normalized_like_any_other_identity():
     cap = capability(_store_holding("ginny", "reader", "analytics.*"))
     assert cap.can_principal_perform_action("GINNY", "analytics.sales.q1", "READ")
