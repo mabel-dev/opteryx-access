@@ -16,7 +16,9 @@ context and this reads two attributes off it. So the dependency points one way
 only -- a deployment brings the two together, neither package requires the
 other, and this file can be read as the full extent of the coupling.
 
-Most checks are answered from that context alone. One is not:
+Most checks are answered from that context alone. Two are not:
+`can_principal_own_materialized_view` is asked about a named principal and
+answered from this package's own list of platform identities, and
 `can_principal_perform_action` is asked about somebody who is not the caller,
 whose policies this process was never issued, so a capability that has to
 answer it is constructed with a `PolicyStore` to read them from:
@@ -29,6 +31,7 @@ here, so what it enforces and what it reports come from one evaluation.
 
 from opteryx_access.actions import ACTION_ROLES
 from opteryx_access.actions import DATA_ACTIONS
+from opteryx_access.checks import PLATFORM_IDENTITIES
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
 from opteryx_access.checks import implicit_grants
@@ -152,6 +155,28 @@ class PermissionsCapability:
             action,
             identity=principal,
         )
+
+    def can_principal_own_materialized_view(self, principal: str) -> bool:
+        """Whether `principal` may be pinned as a materialized view's `runs-as`.
+
+        Refused for the platform identities (`PLATFORM_IDENTITIES`) and nobody
+        else. This is a COSTING rule, not an access one, which is why it is not
+        answerable from grants: those identities can read a great deal - they
+        hold writer on `public.*` and maintain what is in it - but they are
+        identities rather than accounts. Nothing bills them, because nothing
+        sells them. A materialized view refreshes as its owner, on a schedule,
+        forever, so a view a user could point at one would be standing compute
+        billed to nobody.
+
+        Every other principal is permitted. A human account and a service
+        account both sit behind a billing account (a service account cannot be
+        created without claiming a seat on one), so both are costed when they
+        run, and neither needs distinguishing here.
+
+        No store is consulted: a platform identity is refused whatever policies
+        it holds, and holding none would not make it billable.
+        """
+        return normalize(principal) not in PLATFORM_IDENTITIES
 
     def grants(self, identity: str, policies: list) -> list[dict]:
         """The rows behind `SHOW GRANTS`, in the order they are evaluated.

@@ -16,6 +16,7 @@ from opteryx_access.actions import ACTION_ROLES
 from opteryx_access.actions import DATA_ACTIONS
 from opteryx_access.actions import POLICY_ADMINISTRATION_ACTIONS
 from opteryx_access.capability import PermissionsCapability
+from opteryx_access.checks import PLATFORM_IDENTITIES
 from opteryx_access.capability import capability
 from opteryx_access.exceptions import PolicyStoreRequiredError
 from opteryx_access.models import Policy
@@ -393,3 +394,47 @@ def test_an_unrecognised_role_on_a_stored_policy_confers_nothing():
     cap = capability()
     for action in DATA_ACTIONS:
         assert not cap.can_perform_action(context, "ws.coll.tbl", action), action
+
+
+# --- who may be pinned as a materialized view's owner
+
+
+def test_a_platform_identity_may_not_own_a_materialized_view():
+    """The whole point of the check: `federator` reads plenty, but it is an
+    identity rather than an account, so a view refreshing as it is billed to
+    nobody."""
+    cap = capability()
+    for identity in PLATFORM_IDENTITIES:
+        assert not cap.can_principal_own_materialized_view(identity), identity
+
+
+def test_platform_identities_are_refused_however_they_are_spelled():
+    """The engine passes the principal through as written. Casing and stray
+    whitespace must not be a way past a refusal."""
+    cap = capability()
+    for spelling in ("FEDERATOR", "Federator", " federator ", "\tfederator\n"):
+        assert not cap.can_principal_own_materialized_view(spelling), spelling
+
+
+def test_ordinary_principals_may_own_a_materialized_view():
+    """Users and service accounts are indistinguishable here and both allowed:
+    both sit behind a billing account, so both are costed when they run."""
+    cap = capability()
+    for identity in ("alice", "justin@example.com", "scanbot", "federator-ish", "xb5000"):
+        assert cap.can_principal_own_materialized_view(identity), identity
+
+
+def test_ownership_is_refused_without_a_policy_store():
+    """It is a costing rule, not an access one: no policy is read, so the check
+    answers with or without a store, and a platform identity holding every
+    grant in the deployment would not become billable."""
+    assert not capability().can_principal_own_materialized_view("federator")
+    assert not capability(FakePolicyStore()).can_principal_own_materialized_view("federator")
+
+
+def test_a_platform_identity_can_still_read_what_it_maintains():
+    """The refusal is narrow. Refusing to pin a view on `federator` must not
+    quietly become a claim that it cannot act at all."""
+    cap = capability()
+    context = FakeExecutionContext(user="federator")
+    assert cap.can_perform_action(context, "public.gdelt.events", "WRITE")
