@@ -121,17 +121,20 @@ def test_created_at_is_stable_but_updated_at_changes_on_update():
     assert after.created_at == before.created_at
 
 
-def test_to_policy_falls_back_to_doc_id_and_reader_role_for_malformed_data():
+def test_to_policy_confers_nothing_for_malformed_data():
     # Defensive fallback for a document written by something other than this
     # adapter (or corrupted): must not raise KeyError just because a field is
-    # missing, and must never default to a role broader than "reader".
+    # missing, and the fallback values must confer nothing -- an empty role
+    # permits no action and an empty principal matches no identity. Defaulting
+    # the role to "reader" would turn "we don't know what this grants" into
+    # read access.
     store = _store()
     store._db.collection("analytics").document("$policies").collection("access").document(
         "raw-doc"
     ).set({})
     policy = store.get_policy("analytics", "raw-doc")
-    assert policy.principal == "raw-doc"
-    assert policy.role == "reader"
+    assert policy.principal == ""
+    assert policy.role == ""
     assert policy.pattern == ""
 
 

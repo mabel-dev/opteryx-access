@@ -135,9 +135,14 @@ class FirestorePolicyStore:
 
     @staticmethod
     def _to_policy(policy_id: str, data: dict, workspace: str | None = None) -> Policy:
+        # Missing fields default to "", which confers nothing: an unrecognized
+        # role permits no action and an empty principal matches no identity.
+        # A corrupt or hand-edited document must fail closed -- defaulting the
+        # role to "reader" would turn "we don't know what this grants" into
+        # read access.
         return Policy(
-            principal=data.get("principal", policy_id),
-            role=data.get("role", "reader"),
+            principal=data.get("principal", ""),
+            role=data.get("role", ""),
             pattern=data.get("pattern", ""),
             policy_id=policy_id,
             workspace=workspace,

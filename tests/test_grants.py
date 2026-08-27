@@ -375,6 +375,65 @@ def test_update_grant_normalizes_the_stored_pattern():
     assert store.get_policy("analytics", policy_id).pattern == "analytics.sales.q1"
 
 
+def test_update_grant_rejects_colliding_with_another_policy():
+    # An update must not produce the duplicate (principal, pattern) state
+    # grant() refuses to create: moving one of bob's policies onto the exact
+    # pattern of another is refused, and the policy is left as it was.
+    store = _owner_store()
+    store.seed("analytics", Policy(principal="bob", role="reader", pattern="analytics.*"))
+    policy_id = store.seed(
+        "analytics", Policy(principal="bob", role="writer", pattern="analytics.sales.*")
+    )
+    with pytest.raises(PolicyConflictError):
+        update_grant(
+            store,
+            actor="alice",
+            workspace="analytics",
+            policy_id=policy_id,
+            role="writer",
+            pattern="analytics.*",
+        )
+    assert store.get_policy("analytics", policy_id).pattern == "analytics.sales.*"
+
+
+def test_update_grant_rejects_becoming_redundant_under_a_broader_policy():
+    store = _owner_store()
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.*"))
+    policy_id = store.seed(
+        "analytics", Policy(principal="bob", role="owner", pattern="analytics.sales.*")
+    )
+    # Downgrading the narrower policy to a role the broader one already covers
+    # would leave it entirely redundant -- the same rule grant() applies.
+    with pytest.raises(PolicyConflictError):
+        update_grant(
+            store,
+            actor="alice",
+            workspace="analytics",
+            policy_id=policy_id,
+            role="reader",
+            pattern="analytics.sales.*",
+        )
+
+
+def test_update_grant_does_not_conflict_with_itself():
+    # Changing only the role of an existing policy keeps its pattern -- the
+    # policy being updated must be excluded from the comparison or every
+    # role-only update would collide with itself.
+    store = _owner_store()
+    policy_id = store.seed(
+        "analytics", Policy(principal="bob", role="reader", pattern="analytics.sales.*")
+    )
+    update_grant(
+        store,
+        actor="alice",
+        workspace="analytics",
+        policy_id=policy_id,
+        role="writer",
+        pattern="analytics.sales.*",
+    )
+    assert store.get_policy("analytics", policy_id).role == "writer"
+
+
 def test_bootstrap_workspace_creates_scoped_grants():
     store = FakePolicyStore()
     ids = bootstrap_workspace(
@@ -405,13 +464,85 @@ def test_bootstrap_workspace_asks_only_whether_any_policy_exists():
 def test_bootstrap_workspace_refuses_if_already_bootstrapped():
     store = _owner_store(workspace="newspace")
     with pytest.raises(WorkspaceAlreadyBootstrappedError):
-        bootstrap_workspace(store, actor="alice", workspace="newspace", grants=[("bob", "writer")])
+        bootstrap_workspace(store, actor="alice", workspace="newspace", grants=[("bob", "owner")])
 
 
 def test_bootstrap_workspace_rejects_reserved_workspace():
     store = FakePolicyStore()
     with pytest.raises(InvalidPatternError):
         bootstrap_workspace(store, actor="alice", workspace="public", grants=[("alice", "owner")])
+
+
+def test_bootstrap_workspace_requires_an_owner():
+    # Every later grant/revoke needs an existing owner as its actor, and
+    # bootstrap refuses to run twice -- so a workspace born without an owner
+    # could never be administered by anyone. Refused up front, before any
+    # policy is written.
+    store = FakePolicyStore()
+    with pytest.raises(InvalidRoleError):
+        bootstrap_workspace(
+            store,
+            actor="system",
+            workspace="newspace",
+            grants=[("bob", "writer"), ("carol", "reader")],
+        )
+    assert store.list_policies("newspace") == []
+
+
+def test_bootstrap_workspace_rejects_a_duplicate_principal():
+    # Every bootstrap grant covers the same `{workspace}.*` pattern, so two
+    # entries for one principal are the exact-duplicate state grant() refuses
+    # to create. Nothing is written when the list is rejected.
+    store = FakePolicyStore()
+    with pytest.raises(PolicyConflictError):
+        bootstrap_workspace(
+            store,
+            actor="system",
+            workspace="newspace",
+            grants=[("bob", "owner"), ("bob", "reader")],
+        )
+    assert store.list_policies("newspace") == []
+
+
+def test_bootstrap_workspace_sees_a_differently_cased_duplicate_principal():
+    store = FakePolicyStore()
+    with pytest.raises(PolicyConflictError):
+        bootstrap_workspace(
+            store,
+            actor="system",
+            workspace="newspace",
+            grants=[("Bob", "owner"), ("bob", "reader")],
+        )
+
+
+def test_bootstrap_workspace_normalizes_the_workspace():
+    # The store keys on the workspace name, and checks resolve the workspace
+    # from a normalized resource -- so a policy filed under a cased key would
+    # be invisible to them, and a second bootstrap under the other casing
+    # would mint a parallel set of owners.
+    store = FakePolicyStore()
+    bootstrap_workspace(store, actor="system", workspace="Newspace", grants=[("alice", "owner")])
+    [policy] = store.list_policies("newspace")
+    assert policy.pattern == "newspace.*"
+    with pytest.raises(WorkspaceAlreadyBootstrappedError):
+        bootstrap_workspace(
+            store, actor="system", workspace="newspace", grants=[("mallory", "owner")]
+        )
+
+
+def test_grant_and_revoke_normalize_the_workspace():
+    store = _owner_store()
+    policy_id = grant(
+        store,
+        actor="alice",
+        workspace="ANALYTICS",
+        principal="bob",
+        role="reader",
+        pattern="analytics.sales.*",
+    )
+    assert store.get_policy("analytics", policy_id) is not None
+    revoke(store, actor="alice", workspace="Analytics", policy_id=policy_id)
+    assert store.get_policy("analytics", policy_id) is None
 
 
 def test_grants_for_principal_returns_only_the_matching_identity():

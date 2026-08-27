@@ -79,7 +79,7 @@ def grants_for_principal(store: PolicyStore, *, workspace: str, identity: str) -
     """
     return [
         policy.as_grant()
-        for policy in store.list_policies_for_principal(workspace, normalize(identity))
+        for policy in store.list_policies_for_principal(normalize(workspace), normalize(identity))
     ]
 
 
@@ -181,6 +181,11 @@ def grant(
     principal = validate_principal(principal)
     pattern = validate_pattern(pattern)
     actor = normalize(actor)
+    # Workspace names are issued lowercase, so this is a no-op in practice --
+    # but the store keys on it, and a policy filed under a differently-cased
+    # key would be invisible to every check that resolves the workspace from
+    # a (normalized) resource name. Locked in here like every other field.
+    workspace = normalize(workspace)
 
     if principal == actor:
         raise SelfAccessError("you cannot grant yourself access; ask another owner to do it")
@@ -230,10 +235,17 @@ def update_grant(
             policy's current pattern or the requested new one -- otherwise a
             grantor could edit a policy scoped to a pattern they don't govern,
             or use the edit to move it under one they don't.
+        PolicyConflictError: the updated policy would collide with ANOTHER
+            policy the principal holds (see `find_conflict`) -- an update must
+            not produce the duplicate or redundant state `grant()` refuses to
+            create. The policy being updated is excluded from the comparison,
+            so changing only the role of an existing policy is not a conflict
+            with itself.
     """
     _validate_role(role)
     pattern = validate_pattern(pattern)
     actor = normalize(actor)
+    workspace = normalize(workspace)
 
     existing_policy = store.get_policy(workspace, policy_id)
     if existing_policy is None:
@@ -247,6 +259,17 @@ def update_grant(
         actor_policies, actor, existing_policy.pattern
     ) or not can_administer_pattern(actor_policies, actor, pattern):
         raise AccessDeniedError("insufficient permissions to update this policy")
+
+    principal_policies = [
+        policy
+        for policy in store.list_policies_for_principal(
+            workspace, normalize(existing_policy.principal)
+        )
+        if policy.policy_id != policy_id
+    ]
+    conflict = find_conflict(principal_policies, existing_policy.principal, pattern, role)
+    if conflict:
+        raise PolicyConflictError(conflict)
 
     # Read off what is being replaced BEFORE the write. A store is free to
     # hand back a live object rather than a snapshot -- an in-memory one, a
@@ -282,6 +305,7 @@ def revoke(store: PolicyStore, *, actor: str, workspace: str, policy_id: str) ->
             pattern -- not just anywhere in the workspace.
     """
     actor = normalize(actor)
+    workspace = normalize(workspace)
 
     existing_policy = store.get_policy(workspace, policy_id)
     if existing_policy is None:
@@ -339,20 +363,45 @@ def bootstrap_workspace(
         InvalidRoleError, InvalidPatternError: as above, checked for every
             grant up front, before writing any of them -- a bad entry partway
             through the list must not leave a partially-bootstrapped workspace
-            behind.
+            behind. Also InvalidRoleError if no entry grants `owner`: every
+            other mutation requires an existing owner as its actor, and
+            bootstrap refuses to run twice, so a workspace born ownerless
+            could never be administered by anyone, ever.
+        PolicyConflictError: the same principal appears more than once. Each
+            bootstrap grant is scoped to the same `{workspace}.*` pattern, so
+            two entries for one principal are two policy documents on the same
+            (principal, pattern) -- the exact duplicate `grant()` refuses to
+            create.
         WorkspaceAlreadyBootstrappedError: `workspace` already has at least
             one policy. This can only be used once, to bootstrap a workspace
             that doesn't have policies yet -- not to add owners to one that
             already does, which would let anyone holding a valid token mint
             themselves a fresh owner grant with none of `grant()`'s checks.
     """
+    workspace = normalize(workspace)
     pattern = validate_pattern(f"{workspace}.*")
     actor = normalize(actor)
 
     validated = []
+    seen: set[str] = set()
     for principal, role in grants:
         _validate_role(role)
-        validated.append((validate_principal(principal), role))
+        principal = validate_principal(principal)
+        if principal in seen:
+            raise PolicyConflictError(
+                f"{principal!r} appears more than once in the bootstrap grants; every "
+                f"bootstrap grant covers the same pattern {pattern!r}, so one policy per "
+                "principal is all there is to create"
+            )
+        seen.add(principal)
+        validated.append((principal, role))
+
+    if not any(role == "owner" for _, role in validated):
+        raise InvalidRoleError(
+            "bootstrap grants must include at least one 'owner': every later grant or "
+            "revoke needs an existing owner to authorize it, so a workspace created "
+            "without one could never be administered"
+        )
 
     if store.has_any_policies(workspace):
         raise WorkspaceAlreadyBootstrappedError(
