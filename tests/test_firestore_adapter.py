@@ -170,3 +170,44 @@ def test_list_owner_policies_excludes_non_owning_roles():
     )
     store.create_policy("billing", Policy(principal="xb500", role="reader", pattern="billing.*"))
     assert store.list_owner_policies("xb500") == []
+
+
+def test_store_requires_exactly_one_of_db_and_factory():
+    import pytest
+
+    from opteryx_access.adapters.firestore import FirestorePolicyStore
+
+    with pytest.raises(ValueError):
+        FirestorePolicyStore()
+    with pytest.raises(ValueError):
+        FirestorePolicyStore(object(), db_factory=lambda: object())
+
+
+def test_factory_is_consulted_per_access_so_config_changes_take_effect():
+    from fake_firestore import FakeFirestoreClient
+
+    from opteryx_access.adapters.firestore import FirestorePolicyStore
+    from opteryx_access.grants import bootstrap_workspace
+
+    first, second = FakeFirestoreClient(), FakeFirestoreClient()
+    current = {"db": first}
+    store = FirestorePolicyStore(db_factory=lambda: current["db"])
+
+    bootstrap_workspace(store, actor="root", workspace="ws", grants=[("alice", "owner")])
+    assert store.has_any_policies("ws")
+
+    # The "configuration" now names a different database: the same store
+    # object speaks to it immediately -- nothing was frozen at construction.
+    current["db"] = second
+    assert not store.has_any_policies("ws")
+
+
+def test_factory_returning_none_raises_not_denies():
+    import pytest
+
+    from opteryx_access.adapters.firestore import FirestorePolicyStore
+    from opteryx_access.exceptions import PolicyStoreUnavailableError
+
+    store = FirestorePolicyStore(db_factory=lambda: None)
+    with pytest.raises(PolicyStoreUnavailableError):
+        store.has_any_policies("ws")

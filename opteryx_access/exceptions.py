@@ -44,6 +44,17 @@ class WorkspaceAlreadyBootstrappedError(OpteryxAccessError):
     """`bootstrap_workspace` was called on a workspace that already has policies."""
 
 
+class PolicyStoreUnavailableError(OpteryxAccessError):
+    """A lazily-constructed policy store could not reach its backend.
+
+    Raised when a store built over a factory (see `FirestorePolicyStore`'s
+    `db_factory`) asks for its client and gets None. Deliberately not an
+    access answer: the caller asked about or acted on policies and got no
+    backend at all, which must never flatten into "denied" - and even less
+    into "allowed".
+    """
+
+
 class PolicyStoreRequiredError(OpteryxAccessError):
     """A check about another principal was asked of a capability with no store.
 

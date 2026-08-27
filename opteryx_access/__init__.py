@@ -51,6 +51,7 @@ from opteryx_access.exceptions import OpteryxAccessError
 from opteryx_access.exceptions import PolicyConflictError
 from opteryx_access.exceptions import PolicyNotFoundError
 from opteryx_access.exceptions import PolicyStoreRequiredError
+from opteryx_access.exceptions import PolicyStoreUnavailableError
 from opteryx_access.exceptions import SelfAccessError
 from opteryx_access.exceptions import WorkspaceAlreadyBootstrappedError
 from opteryx_access.grants import bootstrap_workspace
@@ -93,6 +94,7 @@ __all__ = [
     "PolicyNotFoundError",
     "PolicyStore",
     "PolicyStoreRequiredError",
+    "PolicyStoreUnavailableError",
     "SelfAccessError",
     "WorkspaceAlreadyBootstrappedError",
     "action_allowed_for_role",

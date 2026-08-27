@@ -20,17 +20,53 @@ import datetime
 import uuid
 
 from opteryx_access.actions import action_allowed_for_role
+from opteryx_access.exceptions import PolicyStoreUnavailableError
 from opteryx_access.models import Policy
 
 
 class FirestorePolicyStore:
-    """`PolicyStore` implementation over a `google.cloud.firestore.Client`."""
+    """`PolicyStore` implementation over a `google.cloud.firestore.Client`.
 
-    def __init__(self, db) -> None:
+    Constructed over either a client (`FirestorePolicyStore(db)`) or a
+    zero-argument factory (`FirestorePolicyStore(db_factory=...)`) - exactly
+    one of the two. The factory exists for services that register the
+    permissions capability at import time but resolve their Firestore
+    project/database from configuration that can change under a running
+    process: it is called on every store access, so the store always speaks
+    to the database the configuration currently names, and nothing about the
+    backend is frozen at registration. Pair it with a cached client helper
+    (the services' `_get_firestore_client` is `lru_cache`d per
+    project/database) so the per-access call is a dict lookup, not a client
+    construction.
+
+    A factory that returns None raises `PolicyStoreUnavailableError` at the
+    point of use - "no backend" is not an access answer and must not become
+    one.
+    """
+
+    def __init__(self, db=None, *, db_factory=None) -> None:
+        if (db is None) == (db_factory is None):
+            raise ValueError(
+                "FirestorePolicyStore takes exactly one of `db` (a Firestore client) "
+                "or `db_factory` (a zero-argument callable returning one)"
+            )
         self._db = db
+        self._db_factory = db_factory
+
+    def _database(self):
+        if self._db is not None:
+            return self._db
+        db = self._db_factory()
+        if db is None:
+            raise PolicyStoreUnavailableError(
+                "the policy store's Firestore client factory returned None - the policy "
+                "backend is unreachable, so this request cannot be answered (it is NOT "
+                "denied, and NOT allowed)"
+            )
+        return db
 
     def _collection(self, workspace: str):
-        return self._db.collection(workspace).document("$policies").collection("access")
+        return self._database().collection(workspace).document("$policies").collection("access")
 
     def list_policies(self, workspace: str) -> list[Policy]:
         return [
@@ -67,8 +103,10 @@ class FirestorePolicyStore:
         # error names the exact index to create if it is missing.
         from google.cloud.firestore_v1.base_query import FieldFilter
 
-        query = self._db.collection_group("access").where(
-            filter=FieldFilter("principal", "==", principal)
+        query = (
+            self._database()
+            .collection_group("access")
+            .where(filter=FieldFilter("principal", "==", principal))
         )
 
         owned = []
