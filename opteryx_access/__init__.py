@@ -59,11 +59,13 @@ from opteryx_access.grants import grant
 from opteryx_access.grants import grants_for_principal
 from opteryx_access.grants import owned_by
 from opteryx_access.grants import revoke
+from opteryx_access.grants import revoke_grant
 from opteryx_access.grants import update_grant
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.models import parse_policy_claim
 from opteryx_access.patterns import RESERVED_WORKSPACES
+from opteryx_access.patterns import pattern_level
 from opteryx_access.patterns import resource_matches
 from opteryx_access.patterns import validate_pattern
 from opteryx_access.patterns import validate_principal
@@ -108,8 +110,10 @@ __all__ = [
     "is_valid_role",
     "owned_by",
     "parse_policy_claim",
+    "pattern_level",
     "resource_matches",
     "revoke",
+    "revoke_grant",
     "role_outranks_or_equals",
     "set_audit_sink",
     "update_grant",

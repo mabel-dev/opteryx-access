@@ -47,6 +47,7 @@ from opteryx_access.exceptions import WorkspaceAlreadyBootstrappedError
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.patterns import normalize
+from opteryx_access.patterns import pattern_level
 from opteryx_access.patterns import resource_matches
 from opteryx_access.patterns import validate_pattern
 from opteryx_access.patterns import validate_principal
@@ -334,6 +335,93 @@ def revoke(store: PolicyStore, *, actor: str, workspace: str, policy_id: str) ->
         principal=principal,
         previous_role=previous_role,
         previous_pattern=previous_pattern,
+    )
+
+
+def revoke_grant(
+    store: PolicyStore,
+    *,
+    actor: str,
+    workspace: str,
+    principal: str,
+    role: str,
+    pattern: str,
+) -> str:
+    """Revoke the one policy granting exactly `role` on `pattern` to
+    `principal`, returning the revoked policy's id.
+
+    The by-value form of `revoke()`, for callers that speak in grants rather
+    than policy ids -- the SQL surface's `REVOKE <role> ON <object> FROM USER
+    <principal>` foremost. Resolution is exact and 1:1: a revoke deletes the
+    single stored policy whose (principal, pattern, role) all match, or
+    deletes nothing and says why. In particular it never acts at a distance
+    on a policy at a DIFFERENT level: access held through `w.*` cannot be
+    revoked by naming `w.c.d` -- narrowing a broader policy is not a delete,
+    and a revoke that "succeeded" while leaving the access in place would be
+    worse than the error.
+
+    The miss diagnostics deliberately name the policy that actually confers
+    the access (its role, pattern, level, and id). That is not a leak: the
+    actor has already cleared owner authority over `pattern` before any of
+    them are reachable.
+
+    Raises:
+        InvalidRoleError, InvalidPatternError: as for `grant()`.
+        SelfAccessError: `actor == principal` -- nobody may revoke their own
+            access; ask another owner to do it.
+        AccessDeniedError: `actor` lacks owner authority covering `pattern`.
+        PolicyNotFoundError: no stored policy matches exactly. The message
+            distinguishes: same pattern held at a different role; the access
+            coming from a policy at another level (named, with its level);
+            or the principal simply holding nothing that covers `pattern`.
+    """
+    _validate_role(role)
+    principal = validate_principal(principal)
+    pattern = validate_pattern(pattern)
+    actor = normalize(actor)
+    workspace = normalize(workspace)
+
+    if principal == actor:
+        raise SelfAccessError("you cannot revoke your own access; ask another owner to do it")
+
+    # Authority is checked BEFORE resolution, exactly as `grant()` checks it
+    # before conflict detection: the diagnostics below describe what the
+    # principal holds, and must not be readable by an actor who could not act
+    # on the answer.
+    if not can_administer_pattern(
+        store.list_policies_for_principal(workspace, actor), actor, pattern
+    ):
+        raise AccessDeniedError("insufficient permissions to revoke a policy for this pattern")
+
+    held = store.list_policies_for_principal(workspace, principal)
+
+    for policy in held:
+        if normalize(policy.pattern) == pattern and normalize(policy.role) == role:
+            revoke(store, actor=actor, workspace=workspace, policy_id=policy.policy_id)
+            return policy.policy_id
+
+    for policy in held:
+        if normalize(policy.pattern) == pattern:
+            raise PolicyNotFoundError(
+                f"{principal!r} holds {policy.role!r} on {pattern!r} (policy "
+                f"{policy.policy_id}), not {role!r} -- a revoke names exactly the role "
+                "that was granted"
+            )
+
+    covering = [policy for policy in held if resource_matches(pattern, policy.pattern)]
+    if covering:
+        policy = covering[0]
+        level = pattern_level(policy.pattern)
+        held_at = f"a {level}-level policy" if level else "a broader policy"
+        raise PolicyNotFoundError(
+            f"no policy grants {role!r} on {pattern!r} to {principal!r} directly: that "
+            f"access comes from {held_at}, {policy.role!r} on {policy.pattern!r} (policy "
+            f"{policy.policy_id}). A revoke deletes exactly one stored policy -- revoke "
+            "that one at its own level, or leave it in place"
+        )
+
+    raise PolicyNotFoundError(
+        f"no policy grants {role!r} on {pattern!r} to {principal!r} in workspace {workspace!r}"
     )
 
 

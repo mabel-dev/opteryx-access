@@ -16,8 +16,8 @@ from opteryx_access.actions import ACTION_ROLES
 from opteryx_access.actions import DATA_ACTIONS
 from opteryx_access.actions import POLICY_ADMINISTRATION_ACTIONS
 from opteryx_access.capability import PermissionsCapability
-from opteryx_access.checks import PLATFORM_IDENTITIES
 from opteryx_access.capability import capability
+from opteryx_access.checks import PLATFORM_IDENTITIES
 from opteryx_access.exceptions import PolicyStoreRequiredError
 from opteryx_access.models import Policy
 from opteryx_access.roles import ROLES
@@ -31,7 +31,7 @@ class FakeExecutionContext:
     access_policies: list = field(default_factory=list)
 
 
-def test_capability_provides_the_four_members_the_engine_requires():
+def test_capability_provides_the_members_the_engine_requires():
     # Mirrors opteryx-core's _REQUIRED_MEMBERS check at registration.
     cap = capability()
     for member in (
@@ -39,6 +39,9 @@ def test_capability_provides_the_four_members_the_engine_requires():
         "can_perform_workspace_action",
         "can_principal_perform_action",
         "grants",
+        "apply_grant",
+        "apply_revoke",
+        "grants_on",
     ):
         assert getattr(cap, member, None) is not None, member
 
@@ -248,17 +251,36 @@ def test_grants_actions_are_derived_from_the_enforced_table():
     rows = capability().grants("alice", [{"pattern": "analytics.*", "role": "writer"}])
     reported = {r["role"]: {a.strip() for a in r["actions"].split(", ")} for r in rows}
     for role, actions in reported.items():
-        assert actions == {a for a in DATA_ACTIONS if role in ACTION_ROLES[a]}, role
+        assert actions == {a for a in ACTION_ROLES if role in ACTION_ROLES[a]}, role
 
 
-def test_grants_never_reports_policy_administration_actions():
-    # GRANT/REVOKE are real actions this package decides, but opteryx has no
-    # statement that performs them -- reporting them would advertise a
-    # capability the SQL surface does not have.
+def test_grants_reports_policy_administration_to_owners_and_nobody_else():
+    # GRANT/REVOKE are performed by opteryx's own GRANT/REVOKE/SHOW GRANTS ON
+    # statements, so an owner's row advertises them; a non-owner's never does.
     rows = capability().grants("alice", [{"pattern": "analytics.*", "role": "owner"}])
     for row in rows:
         reported = {a.strip() for a in row["actions"].split(", ")}
-        assert not (reported & POLICY_ADMINISTRATION_ACTIONS), row
+        if row["role"] == "owner":
+            assert reported >= POLICY_ADMINISTRATION_ACTIONS, row
+        else:
+            assert not (reported & POLICY_ADMINISTRATION_ACTIONS), row
+
+
+def test_grants_rows_carry_the_object_level():
+    rows = capability().grants(
+        "alice",
+        [
+            {"pattern": "analytics.*", "role": "writer"},
+            {"pattern": "analytics.sales.*", "role": "writer"},
+            {"pattern": "analytics.sales.q1", "role": "owner"},
+        ],
+    )
+    levels = {r["pattern"]: r["level"] for r in rows}
+    assert levels["personal.alice.*"] == "collection"  # escaped identity is one segment
+    assert levels["public.*"] == "workspace"
+    assert levels["analytics.*"] == "workspace"
+    assert levels["analytics.sales.*"] == "collection"
+    assert levels["analytics.sales.q1"] == "dataset"
 
 
 def test_owner_reports_strictly_more_than_writer():

@@ -43,9 +43,10 @@ ACTION_ROLES = {
 
 # The actions that administer policy rather than touch data. Named here, next
 # to the table, so a consumer that only handles one kind can say which it
-# means instead of restating the pair -- see `opteryx_access.capability`, where
-# the query engine reports the data actions and not these (it has no GRANT or
-# REVOKE statement to offer).
+# means instead of restating the pair. The query engine performs these too --
+# its GRANT/REVOKE/SHOW GRANTS ON statements land on
+# `opteryx_access.capability`'s apply_grant/apply_revoke/grants_on -- so its
+# SHOW GRANTS reports them alongside the data actions.
 POLICY_ADMINISTRATION_ACTIONS: frozenset[str] = frozenset({"GRANT", "REVOKE"})
 
 # Everything else: the actions a query engine can be asked to perform.

@@ -33,7 +33,6 @@ from opteryx_access.patterns import escape_glob
 from opteryx_access.patterns import normalize
 from opteryx_access.patterns import resource_matches
 
-
 # Identities that maintain the `public` workspace rather than merely read it:
 # the platform's own automation. `public` holds curated open data (GDELT,
 # vulnerability feeds, and the rest) that something has to load and keep

@@ -62,7 +62,7 @@ is meant to stop.
 | `patterns.py` | `policy.opteryx/app/models/policy.py` + `app/routes/v1/access.py` | What a pattern and a principal may look like, and how a pattern matches: `validate_pattern`, `validate_principal`, `resource_matches` (see "Patterns and principals" below). |
 | `models.py` | `authenticate.opteryx/app/policies.py` | `Grant` (role+pattern, the JWT-carried shape) and `Policy` (principal+role+pattern+metadata, the stored shape), plus `parse_policy_claim` for the `[role, pattern]` pairs a token carries. |
 | `checks.py` | `opteryx-core`'s `can_perform_action`/`can_perform_workspace_action` + `policy.opteryx`'s `_check_pattern_access`/`_check_workspace_access` | The evaluation layer: data-plane checks over `Grant`s, administrative-plane checks over `Policy` documents. |
-| `grants.py` | `policy.opteryx/app/routes/v1/access.py`'s `create_policy`/`update_policy`/`delete_policy`/`create_genesis_policies` | The write half: `grant()`/`update_grant()`/`revoke()`/`bootstrap_workspace()`, enforcing every rule those routes did (self-grant prevention, pattern authority, conflict detection, principal and pattern validation) before calling a store. Also the two reads that need a store: `grants_for_principal()` and `owned_by()`. |
+| `grants.py` | `policy.opteryx/app/routes/v1/access.py`'s `create_policy`/`update_policy`/`delete_policy`/`create_genesis_policies` | The write half: `grant()`/`update_grant()`/`revoke()`/`revoke_grant()`/`bootstrap_workspace()`, enforcing every rule those routes did (self-grant prevention, pattern authority, conflict detection, principal and pattern validation) before calling a store. `revoke_grant` is the by-value form behind SQL `REVOKE` -- strictly 1:1 resolution by (principal, pattern, role), with level-mismatch diagnostics. Also the two reads that need a store: `grants_for_principal()` and `owned_by()`. |
 | `store.py` | (new) | The `PolicyStore` protocol: the storage contract, and nothing else. No rules live here -- see "Layering" below. |
 | `audit.py` | `policy.opteryx/app/routes/v1/access.py`'s `_audit_policy_change` | One structured record per policy change, on the same field contract the existing log transforms already parse -- see "Audit records" below. |
 | `capability.py` | (new) | The permissions capability opteryx-core registers -- the one module that knows the engine exists. See "The opteryx-core capability" below. |
@@ -246,12 +246,18 @@ package depends on the other; a deployment brings them together. That is what
 keeps opteryx-core's zero-dependency contract intact, and it means the whole
 extent of the coupling can be read in one file.
 
-Two things it deliberately does not report through `SHOW GRANTS`:
+The capability also carries the engine's grant-administration surface --
+`apply_grant`, `apply_revoke`, and `grants_on`, behind opteryx's
+`GRANT`/`REVOKE`/`SHOW GRANTS ON` statements. All three are thin delegations
+to `grants.py`/`checks.py` (the rules live there, once) and all three require
+the capability to have been built as `capability(store)`; without a store
+they raise `PolicyStoreRequiredError` rather than guessing. Because the SQL
+surface performs `GRANT`/`REVOKE`, `SHOW GRANTS` reports those actions on
+owner rows alongside the data actions -- what is advertised and what the
+surface offers moved together.
 
-- **`GRANT`/`REVOKE`** (`actions.POLICY_ADMINISTRATION_ACTIONS`). They are
-  real actions this package decides, but no SQL statement in opteryx performs
-  them, so naming them in the engine's output would advertise a capability
-  its surface does not have. Only `actions.DATA_ACTIONS` are reported.
+One thing that stays deliberate:
+
 - **Registration is start-up only.** opteryx-core refuses a capability
   registered after a permission check has already been answered, rather than
   let one process decide the same question two ways.
@@ -285,7 +291,7 @@ from opteryx_access import Grant, can_perform_action
 
 grants = [Grant(role="writer", pattern="analytics.sales.*")]
 can_perform_action(grants, "analytics.sales.q1", "DELETE")  # True
-can_perform_action(grants, "analytics.sales.q1", "DROP")    # False -- writer, not owner
+can_perform_action(grants, "analytics.sales.q1", "DROP")  # False -- writer, not owner
 ```
 
 ```python
@@ -304,8 +310,12 @@ from opteryx_access.adapters.firestore import FirestorePolicyStore
 store = FirestorePolicyStore(db)  # db: google.cloud.firestore.Client
 try:
     policy_id = grant(
-        store, actor="alice", workspace="analytics",
-        principal="bob", role="writer", pattern="analytics.sales.*",
+        store,
+        actor="alice",
+        workspace="analytics",
+        principal="bob",
+        role="writer",
+        pattern="analytics.sales.*",
     )
 except AccessDeniedError:
     ...  # translate to a 403, same as the route used to do inline

@@ -16,30 +16,39 @@ context and this reads two attributes off it. So the dependency points one way
 only -- a deployment brings the two together, neither package requires the
 other, and this file can be read as the full extent of the coupling.
 
-Most checks are answered from that context alone. Two are not:
+Most checks are answered from that context alone. The exceptions:
 `can_principal_own_materialized_view` is asked about a named principal and
-answered from this package's own list of platform identities, and
+answered from this package's own list of platform identities;
 `can_principal_perform_action` is asked about somebody who is not the caller,
-whose policies this process was never issued, so a capability that has to
-answer it is constructed with a `PolicyStore` to read them from:
+whose policies this process was never issued; and grant administration
+(`apply_grant`/`apply_revoke`/`grants_on`, behind the engine's
+`GRANT`/`REVOKE`/`SHOW GRANTS ON` statements) reads and writes live policy
+state. A capability that has to answer any of those is constructed with a
+`PolicyStore`:
 
     opteryx.register_permissions_capability(opteryx_access.capability(store))
 
-The engine's own permission checks and `SHOW GRANTS` are both answered from
-here, so what it enforces and what it reports come from one evaluation.
+The engine's own permission checks, its `SHOW GRANTS`, and its grant
+mutations are all answered from here, so what it enforces, what it reports,
+and what it changes come from one evaluation.
 """
 
 from opteryx_access.actions import ACTION_ROLES
-from opteryx_access.actions import DATA_ACTIONS
 from opteryx_access.checks import PLATFORM_IDENTITIES
+from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
 from opteryx_access.checks import implicit_grants
+from opteryx_access.exceptions import AccessDeniedError
 from opteryx_access.exceptions import PolicyStoreRequiredError
+from opteryx_access.grants import grant
 from opteryx_access.grants import grants_for_principal
+from opteryx_access.grants import revoke_grant
 from opteryx_access.models import Grant
 from opteryx_access.models import parse_policy_claim
 from opteryx_access.patterns import normalize
+from opteryx_access.patterns import pattern_level
+from opteryx_access.patterns import validate_pattern
 from opteryx_access.store import PolicyStore
 
 __all__ = ("PermissionsCapability", "capability")
@@ -63,16 +72,16 @@ def _grants(policies) -> list[Grant]:
 
 
 def _actions_for(role: str) -> str:
-    """The data actions `role` confers, as `SHOW GRANTS` renders them.
+    """The actions `role` confers, as `SHOW GRANTS` renders them.
 
     Derived from `ACTION_ROLES` rather than restated, so the column cannot
     describe a permission that is not the one enforced. Policy administration
-    (`GRANT`/`REVOKE`) is excluded: those are real actions this package
-    decides, but no SQL statement in opteryx performs them, so naming them in
-    the engine's own output would advertise a capability its surface does not
-    have.
+    (`GRANT`/`REVOKE`) is included: opteryx performs them as SQL statements
+    (`GRANT`/`REVOKE`/`SHOW GRANTS ON`), so an owner's row advertises exactly
+    what an owner may do. Before that surface existed they were deliberately
+    hidden here; the surface and this line changed together.
     """
-    return ", ".join(sorted(action for action in DATA_ACTIONS if role in ACTION_ROLES[action]))
+    return ", ".join(sorted(action for action in ACTION_ROLES if role in ACTION_ROLES[action]))
 
 
 class PermissionsCapability:
@@ -185,11 +194,138 @@ class PermissionsCapability:
         them first and stops: read top-down, the table is the order the engine
         actually decides in, so a caller can see why `public.*` is read-only
         even where a broader policy appears below it.
+
+        `level` labels each pattern the way the SQL surface speaks
+        (workspace/collection/dataset, via `pattern_level`); a pattern that
+        addresses no single object carries an empty label rather than a
+        guessed one.
         """
         held = implicit_grants(identity) + _grants(policies)
         return [
-            {"pattern": grant.pattern, "role": grant.role, "actions": _actions_for(grant.role)}
-            for grant in held
+            {
+                "pattern": held_grant.pattern,
+                "level": pattern_level(held_grant.pattern) or "",
+                "role": held_grant.role,
+                "actions": _actions_for(held_grant.role),
+            }
+            for held_grant in held
+        ]
+
+    def _administration_store(self, doing: str) -> PolicyStore:
+        """The store, or the refusal to guess without one.
+
+        Grant administration is a write against live policy state; the
+        session's own token says nothing about what other principals hold.
+        Raising mirrors `can_principal_perform_action`: no store is "cannot
+        answer", never "denied" and never "allowed".
+        """
+        if self._store is None:
+            raise PolicyStoreRequiredError(
+                f"cannot {doing}: this capability was built by capability() with no "
+                "PolicyStore, so it can only answer about the session that is asking. "
+                "Build it as capability(store) to administer grants."
+            )
+        return self._store
+
+    def _acting_identity(self, execution_context) -> str:
+        """The identity administering grants, refused for anonymous sessions.
+
+        Every grant rule downstream reasons about a named actor -- authority,
+        self-service, audit attribution -- so a session with no identity has
+        nothing those rules can hold to account.
+        """
+        identity = _identity(execution_context)
+        if not identity:
+            raise AccessDeniedError("an anonymous session cannot administer grants")
+        return normalize(identity)
+
+    def apply_grant(self, execution_context, pattern: str, role: str, principal: str) -> str:
+        """Add ONE policy: `role` on `pattern` to `principal`. Returns its id.
+
+        The engine's `GRANT <role> ON <object> TO USER <principal>`, with the
+        object already mapped to its pattern by the binder (`WORKSPACE w` ->
+        `w.*`, `COLLECTION w.c` -> `w.c.*`, `DATASET w.c.d` -> `w.c.d`).
+        Every rule -- owner authority covering the pattern, the no-self-service
+        rule, validation, conflict/redundancy refusal, the audit record --
+        lives in `opteryx_access.grants.grant`, which this delegates to whole.
+        There is no upgrade path: changing an existing grant is REVOKE then
+        GRANT, by the caller.
+        """
+        store = self._administration_store(f"grant {role!r} on {pattern!r}")
+        actor = self._acting_identity(execution_context)
+        pattern = validate_pattern(pattern)
+        workspace = pattern.split(".", 1)[0]
+        return grant(
+            store,
+            actor=actor,
+            workspace=workspace,
+            principal=principal,
+            role=role,
+            pattern=pattern,
+        )
+
+    def apply_revoke(self, execution_context, pattern: str, role: str, principal: str) -> str:
+        """Delete ONE policy: the exact (`principal`, `pattern`, `role`) match.
+
+        The engine's `REVOKE <role> ON <object> FROM USER <principal>`.
+        Resolution and every rule live in `opteryx_access.grants.revoke_grant`:
+        strictly 1:1 -- access held through a policy at a different level is
+        reported (naming that policy and its level), never narrowed or
+        silently left in place. Returns the revoked policy's id.
+        """
+        store = self._administration_store(f"revoke {role!r} on {pattern!r}")
+        actor = self._acting_identity(execution_context)
+        pattern = validate_pattern(pattern)
+        workspace = pattern.split(".", 1)[0]
+        return revoke_grant(
+            store,
+            actor=actor,
+            workspace=workspace,
+            principal=principal,
+            role=role,
+            pattern=pattern,
+        )
+
+    def grants_on(self, execution_context, pattern: str) -> list[dict]:
+        """The rows behind `SHOW GRANTS ON <object>`: stored policies, one row
+        per policy, `(user, pattern, level, role)`, ordered by user then
+        pattern.
+
+        `SHOW GRANTS ON WORKSPACE w` arrives as `w.*` and lists EVERY policy
+        in the workspace, whatever level each is scoped to -- the access-list
+        screen, as SQL. A narrower object (`w.c.*`, `w.c.d`) lists only the
+        policies at exactly that object: 1:1 with what GRANT and REVOKE there
+        would act on. A broader policy that merely covers the object is not
+        that object's to show -- it is visible in the workspace listing.
+
+        Gated on the same authority a mutation needs (`can_administer_pattern`:
+        owner, covering the pattern) -- deliberately not the weaker
+        `has_workspace_access`, and deliberately identical for reading and
+        writing: who may see the grants is who may change them.
+        """
+        store = self._administration_store(f"list the grants on {pattern!r}")
+        actor = self._acting_identity(execution_context)
+        pattern = validate_pattern(pattern)
+        workspace = pattern.split(".", 1)[0]
+
+        if not can_administer_pattern(
+            store.list_policies_for_principal(workspace, actor), actor, pattern
+        ):
+            raise AccessDeniedError("insufficient permissions to list the grants on this pattern")
+
+        policies = store.list_policies(workspace)
+        if pattern != f"{workspace}.*":
+            policies = [policy for policy in policies if normalize(policy.pattern) == pattern]
+
+        policies.sort(key=lambda policy: (normalize(policy.principal), normalize(policy.pattern)))
+        return [
+            {
+                "user": policy.principal,
+                "pattern": policy.pattern,
+                "level": pattern_level(policy.pattern) or "",
+                "role": policy.role,
+            }
+            for policy in policies
         ]
 
 

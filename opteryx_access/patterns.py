@@ -165,3 +165,37 @@ def pattern_segments(pattern: str) -> tuple[str, str | None, str | None]:
 def is_literal_segment(segment: str | None) -> bool:
     """True if `segment` names one resource exactly rather than standing for any."""
     return bool(segment) and segment != WILDCARD_SEGMENT
+
+
+def pattern_level(pattern: str) -> str | None:
+    """The object level a pattern addresses: 'workspace', 'collection',
+    'dataset', or None when it fits none of them.
+
+    This is the mapping the SQL surface's object kinds use -- `GRANT ... ON
+    WORKSPACE w` issues `w.*`, `ON COLLECTION w.c` issues `w.c.*`, `ON
+    DATASET w.c.d` issues `w.c.d` -- read back from the pattern, so a listing
+    can label each stored policy the way it would be spoken. A bare literal
+    (`w`, `w.c`) addresses the same object as its `.*` form, just without the
+    subtree, so it carries the same label.
+
+    Patterns that name no single object -- a wildcard mid-pattern (`w.*.d`),
+    or something deeper than a dataset -- have no level and return None. They
+    cannot be issued by the SQL surface, but a stored policy predating it can
+    still look like anything `validate_pattern` accepts, and a listing must
+    label only what it can label truthfully.
+    """
+    segments = normalize(pattern).split(".")
+    if not is_literal_segment(segments[0]):
+        return None
+
+    if len(segments) == 1:
+        return "workspace"
+    if len(segments) == 2:
+        if segments[1] == WILDCARD_SEGMENT:
+            return "workspace"
+        return "collection"
+    if len(segments) == 3 and is_literal_segment(segments[1]):
+        if segments[2] == WILDCARD_SEGMENT:
+            return "collection"
+        return "dataset"
+    return None
