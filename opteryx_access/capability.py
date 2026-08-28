@@ -21,9 +21,9 @@ Most checks are answered from that context alone. The exceptions:
 answered from this package's own list of platform identities;
 `can_principal_perform_action` is asked about somebody who is not the caller,
 whose policies this process was never issued; and grant administration
-(`apply_grant`/`apply_revoke`/`grants_on`, behind the engine's
-`GRANT`/`REVOKE`/`SHOW GRANTS ON` statements) reads and writes live policy
-state. A capability that has to answer any of those is constructed with a
+(`apply_grant`/`apply_revoke`/`grants_on`/`effective_grants_on`, behind the
+engine's `GRANT`/`REVOKE`/`SHOW GRANTS ON`/`SHOW EFFECTIVE GRANTS ON`
+statements) reads and writes live policy state. A capability that has to answer any of those is constructed with a
 `PolicyStore`:
 
     opteryx.register_permissions_capability(opteryx_access.capability(store))
@@ -48,6 +48,7 @@ from opteryx_access.models import Grant
 from opteryx_access.models import parse_policy_claim
 from opteryx_access.patterns import normalize
 from opteryx_access.patterns import pattern_level
+from opteryx_access.patterns import resource_matches
 from opteryx_access.patterns import validate_pattern
 from opteryx_access.store import PolicyStore
 
@@ -286,24 +287,24 @@ class PermissionsCapability:
             pattern=pattern,
         )
 
-    def grants_on(self, execution_context, pattern: str) -> list[dict]:
-        """The rows behind `SHOW GRANTS ON <object>`: stored policies, one row
-        per policy, `(user, pattern, level, role)`, ordered by user then
-        pattern.
+    def _policy_rows(
+        self, execution_context, pattern: str, doing: str, covering: bool
+    ) -> list[dict]:
+        """The shared body of the two grant listings: gate, select, render.
 
-        `SHOW GRANTS ON WORKSPACE w` arrives as `w.*` and lists EVERY policy
-        in the workspace, whatever level each is scoped to -- the access-list
-        screen, as SQL. A narrower object (`w.c.*`, `w.c.d`) lists only the
-        policies at exactly that object: 1:1 with what GRANT and REVOKE there
-        would act on. A broader policy that merely covers the object is not
-        that object's to show -- it is visible in the workspace listing.
+        `covering` is the ONLY difference between them, and it is one line: an
+        attached listing keeps the policies stored at exactly `pattern`, an
+        effective one keeps every policy whose own pattern covers it. Sharing
+        the rest is deliberate -- the gate, the ordering and the four columns
+        must be identical, so that the two statements can be read side by side
+        and the console can render both with one renderer.
 
-        Gated on the same authority a mutation needs (`can_administer_pattern`:
-        owner, covering the pattern) -- deliberately not the weaker
-        `has_workspace_access`, and deliberately identical for reading and
-        writing: who may see the grants is who may change them.
+        A workspace pattern (`w.*`) skips the filter entirely in both modes:
+        the workspace listing is already every policy at every level, which is
+        also every policy that covers the workspace. The two statements
+        therefore agree there by construction rather than by coincidence.
         """
-        store = self._administration_store(f"list the grants on {pattern!r}")
+        store = self._administration_store(doing)
         actor = self._acting_identity(execution_context)
         pattern = validate_pattern(pattern)
         workspace = pattern.split(".", 1)[0]
@@ -315,7 +316,19 @@ class PermissionsCapability:
 
         policies = store.list_policies(workspace)
         if pattern != f"{workspace}.*":
-            policies = [policy for policy in policies if normalize(policy.pattern) == pattern]
+            if covering:
+                # `resource_matches` is the matcher `can_perform_action` decides
+                # real queries with, asked here with the object as the resource.
+                # Reusing it is the whole value of the effective listing: a
+                # private covering test would drift and start reporting access
+                # that does not exist, or hiding access that does.
+                policies = [
+                    policy for policy in policies if resource_matches(pattern, policy.pattern)
+                ]
+            else:
+                policies = [
+                    policy for policy in policies if normalize(policy.pattern) == pattern
+                ]
 
         policies.sort(key=lambda policy: (normalize(policy.principal), normalize(policy.pattern)))
         return [
@@ -327,6 +340,63 @@ class PermissionsCapability:
             }
             for policy in policies
         ]
+
+    def grants_on(self, execution_context, pattern: str) -> list[dict]:
+        """The rows behind `SHOW GRANTS ON <object>`: stored policies, one row
+        per policy, `(user, pattern, level, role)`, ordered by user then
+        pattern.
+
+        `SHOW GRANTS ON WORKSPACE w` arrives as `w.*` and lists EVERY policy
+        in the workspace, whatever level each is scoped to -- the access-list
+        screen, as SQL. A narrower object (`w.c.*`, `w.c.d`) lists only the
+        policies at exactly that object: 1:1 with what GRANT and REVOKE there
+        would act on. A broader policy that merely covers the object is not
+        that object's to show -- it is `effective_grants_on` that answers who
+        can reach the object, and the workspace listing that shows the lot.
+
+        Gated on the same authority a mutation needs (`can_administer_pattern`:
+        owner, covering the pattern) -- deliberately not the weaker
+        `has_workspace_access`, and deliberately identical for reading and
+        writing: who may see the grants is who may change them.
+        """
+        return self._policy_rows(
+            execution_context, pattern, f"list the grants on {pattern!r}", covering=False
+        )
+
+    def effective_grants_on(self, execution_context, pattern: str) -> list[dict]:
+        """The rows behind `SHOW EFFECTIVE GRANTS ON <object>`: every stored
+        policy that COVERS the object, one row per policy, in the same four
+        columns and the same order as `grants_on`.
+
+        The other question about an object. `grants_on` answers what is stored
+        AT it -- 1:1 with what GRANT and REVOKE there act on -- and returns
+        nothing for a dataset whose only reachable-by policy is the workspace
+        owner's `w.*`. This answers who can reach the object at all, that
+        owner included, and says why: the `pattern` and `level` columns carry
+        the covering policy, so a row reading `(bob, w.*, workspace, owner)`
+        against a dataset explains itself without a fifth column.
+
+        One row per COVERING POLICY, not per user, and no highest-role-wins
+        collapse: a user may reach an object through more than one policy, and
+        which policy grants it is exactly what has to change to take it away.
+        A consumer wanting one effective role per user collapses the rows
+        itself.
+
+        `SHOW EFFECTIVE GRANTS ON WORKSPACE w` returns what `SHOW GRANTS ON
+        WORKSPACE w` returns -- a workspace listing is already every policy at
+        every level. The two statements differ only for a COLLECTION or a
+        DATASET.
+
+        The covering test is `resource_matches`, the matcher that decides real
+        queries, never a second implementation of it. Gated identically to
+        `grants_on`: owner authority covering the object.
+        """
+        return self._policy_rows(
+            execution_context,
+            pattern,
+            f"list the effective grants on {pattern!r}",
+            covering=True,
+        )
 
 
 def capability(store: PolicyStore | None = None) -> PermissionsCapability:

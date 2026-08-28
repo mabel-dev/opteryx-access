@@ -42,6 +42,7 @@ def test_capability_provides_the_members_the_engine_requires():
         "apply_grant",
         "apply_revoke",
         "grants_on",
+        "effective_grants_on",
     ):
         assert getattr(cap, member, None) is not None, member
 

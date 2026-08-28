@@ -166,3 +166,122 @@ def test_grants_on_requires_a_store():
 def test_grants_on_refuses_an_anonymous_session():
     with pytest.raises(AccessDeniedError):
         capability(_store()).grants_on(FakeExecutionContext(user=None), "analytics.*")
+
+
+# --- effective_grants_on
+
+
+def test_effective_grants_on_a_dataset_surfaces_the_covering_workspace_owner():
+    # The reported case: a dataset with nothing stored at it is still reachable
+    # by the workspace owner, and the attached listing says nothing about it.
+    store = _store()
+    cap = capability(store)
+    context = _alice()
+    assert cap.grants_on(context, "analytics.ops.audit_log") == []
+    assert cap.effective_grants_on(context, "analytics.ops.audit_log") == [
+        {"user": "alice", "pattern": "analytics.*", "level": "workspace", "role": "owner"}
+    ]
+
+
+def test_effective_grants_on_a_dataset_includes_the_covering_collection():
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.ops.*"))
+    # A sibling collection covers nothing here and must not appear.
+    store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.sales.*"))
+    rows = capability(store).effective_grants_on(_alice(), "analytics.ops.audit_log")
+    assert [(r["user"], r["pattern"], r["level"], r["role"]) for r in rows] == [
+        ("alice", "analytics.*", "workspace", "owner"),
+        ("bob", "analytics.ops.*", "collection", "writer"),
+    ]
+
+
+def test_effective_grants_on_reports_one_row_per_covering_policy():
+    # No highest-role-wins collapse: which policy grants the access is what an
+    # administrator has to change to take it away.
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="reader", pattern="analytics.*"))
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.ops.*"))
+    rows = capability(store).effective_grants_on(_alice(), "analytics.ops.audit_log")
+    assert [(r["user"], r["pattern"], r["role"]) for r in rows] == [
+        ("alice", "analytics.*", "owner"),
+        ("bob", "analytics.*", "reader"),
+        ("bob", "analytics.ops.*", "writer"),
+    ]
+
+
+def test_effective_grants_on_includes_what_is_attached_at_the_object():
+    store = _store()
+    store.seed(
+        "analytics", Policy(principal="ginny", role="reader", pattern="analytics.ops.audit_log")
+    )
+    rows = capability(store).effective_grants_on(_alice(), "analytics.ops.audit_log")
+    assert [(r["user"], r["pattern"]) for r in rows] == [
+        ("alice", "analytics.*"),
+        ("ginny", "analytics.ops.audit_log"),
+    ]
+
+
+def test_effective_grants_on_a_collection_covers_at_and_above_it():
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.ops.*"))
+    # Below the collection: a dataset policy does not cover the collection.
+    store.seed(
+        "analytics", Policy(principal="ginny", role="reader", pattern="analytics.ops.audit_log")
+    )
+    rows = capability(store).effective_grants_on(_alice(), "analytics.ops.*")
+    assert [(r["user"], r["pattern"]) for r in rows] == [
+        ("alice", "analytics.*"),
+        ("bob", "analytics.ops.*"),
+    ]
+
+
+def test_effective_grants_on_a_workspace_matches_the_attached_listing():
+    # A workspace listing is already every policy at every level, so the two
+    # statements agree there by construction.
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.ops.*"))
+    store.seed(
+        "analytics", Policy(principal="ginny", role="reader", pattern="analytics.ops.audit_log")
+    )
+    cap = capability(store)
+    assert cap.effective_grants_on(_alice(), "analytics.*") == cap.grants_on(
+        _alice(), "analytics.*"
+    )
+
+
+def test_effective_grants_on_is_gated_exactly_as_the_attached_listing_is():
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.*"))
+    with pytest.raises(AccessDeniedError):
+        capability(store).effective_grants_on(
+            FakeExecutionContext(user="bob"), "analytics.ops.audit_log"
+        )
+
+
+def test_effective_grants_on_requires_a_store_and_an_identity():
+    with pytest.raises(PolicyStoreRequiredError):
+        capability().effective_grants_on(_alice(), "analytics.*")
+    with pytest.raises(AccessDeniedError):
+        capability(_store()).effective_grants_on(
+            FakeExecutionContext(user=None), "analytics.*"
+        )
+
+
+def test_effective_grants_on_agrees_with_what_can_perform_action_decides():
+    # The listing and enforcement must not drift: every row it reports is a
+    # policy that would in fact let its holder read the dataset.
+    from opteryx_access.checks import can_perform_action
+    from opteryx_access.models import Grant
+
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="reader", pattern="analytics.ops.*"))
+    store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.sales.*"))
+    rows = capability(store).effective_grants_on(_alice(), "analytics.ops.audit_log")
+    for row in rows:
+        assert can_perform_action(
+            [Grant(role=row["role"], pattern=row["pattern"])],
+            "analytics.ops.audit_log",
+            "READ",
+            identity=row["user"],
+        )
+    assert "ginny" not in {row["user"] for row in rows}

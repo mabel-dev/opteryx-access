@@ -247,9 +247,16 @@ keeps opteryx-core's zero-dependency contract intact, and it means the whole
 extent of the coupling can be read in one file.
 
 The capability also carries the engine's grant-administration surface --
-`apply_grant`, `apply_revoke`, and `grants_on`, behind opteryx's
-`GRANT`/`REVOKE`/`SHOW GRANTS ON` statements. All three are thin delegations
-to `grants.py`/`checks.py` (the rules live there, once) and all three require
+`apply_grant`, `apply_revoke`, `grants_on`, and `effective_grants_on`,
+behind opteryx's `GRANT`/`REVOKE`/`SHOW GRANTS ON`/`SHOW EFFECTIVE GRANTS ON`
+statements. `grants_on` lists what is stored AT an object, 1:1 with what a
+GRANT or REVOKE there would act on; `effective_grants_on` lists every policy
+that COVERS it, so a dataset reachable only through the workspace owner's
+`w.*` names that owner instead of returning nothing. Both decide coverage
+with `resource_matches`, the matcher that decides real queries, so a listing
+cannot report access the engine would not grant. All four are thin
+delegations to `grants.py`/`checks.py` (the rules live there, once) and all
+four require
 the capability to have been built as `capability(store)`; without a store
 they raise `PolicyStoreRequiredError` rather than guessing. Because the SQL
 surface performs `GRANT`/`REVOKE`, `SHOW GRANTS` reports those actions on
