@@ -48,6 +48,17 @@ RESERVED_WORKSPACES: tuple[str, ...] = ("public", "personal")
 # can't be granted as an independent resource.
 INFORMATION_SCHEMA_COLLECTION = "information_schema"
 
+# Engine-private storage lives under a collection whose name starts with this:
+# the declared-relationship store at `<workspace>/$system/relationships` is the
+# first, and anything placed beside it inherits the same treatment.
+#
+# It is not a dataset. It is in no listing, has no catalog entry, and cannot be
+# named in a query -- the engine's own identifier grammar rejects `$` in a
+# relation name, so a reader cannot even spell it. This package must not be the
+# weak link in that: see `is_engine_private`, which is a DENY consulted before
+# any grant, not merely an absence of one.
+ENGINE_PRIVATE_PREFIX = "$"
+
 
 def normalize(value: str) -> str:
     """Casefold and trim `value` for comparison or storage."""
@@ -72,6 +83,25 @@ def resource_matches(resource: str, pattern: str) -> bool:
     result stays identical across platforms.
     """
     return fnmatch.fnmatchcase(normalize(resource), normalize(pattern))
+
+
+def is_engine_private(resource: str) -> bool:
+    """Whether `resource` names engine-private storage, which no grant reaches.
+
+    True if ANY segment starts with `ENGINE_PRIVATE_PREFIX`, not just the
+    collection: a resource is denied on the strength of how it is spelled, and
+    checking one position would leave the others to chance.
+
+    This exists because refusing to ISSUE a policy over `$system` is not
+    enough. A pattern's `*` covers everything below it, so an ordinary
+    workspace grant of `ws.*` matches `ws.$system.relationships` perfectly
+    well. Without a deny consulted first, every workspace owner could read the
+    relationship store, which is the one thing its placement was chosen to
+    prevent.
+    """
+    return any(
+        segment.startswith(ENGINE_PRIVATE_PREFIX) for segment in normalize(resource).split(".")
+    )
 
 
 def validate_principal(principal: str) -> str:
@@ -108,10 +138,12 @@ def validate_principal(principal: str) -> str:
 def validate_pattern(pattern: str) -> str:
     """Check `pattern` is a usable resource pattern, returning it normalized.
 
-    Enforces, in order: a non-empty pattern; every segment either `*` or a
-    literal name (which rejects empty segments like `a..b`, leading digits,
-    and stray punctuation); a literal workspace segment; a workspace that is
-    not reserved; and no grant over `information_schema`.
+    Enforces, in order: a non-empty pattern; no engine-private name (`$...`,
+    which the generic segment rule would also reject, but with a message that
+    does not say why); every segment either `*` or a literal name (which
+    rejects empty segments like `a..b`, leading digits, and stray
+    punctuation); a literal workspace segment; a workspace that is not
+    reserved; and no grant over `information_schema`.
 
     Raises:
         InvalidPatternError: with a message naming which rule was broken.
@@ -119,6 +151,13 @@ def validate_pattern(pattern: str) -> str:
     normalized = normalize(pattern)
     if not normalized:
         raise InvalidPatternError("a policy must name the resources it applies to")
+
+    if is_engine_private(normalized):
+        raise InvalidPatternError(
+            f"pattern {pattern!r} is not allowed: names beginning with "
+            f"{ENGINE_PRIVATE_PREFIX!r} are engine-private storage and are not grantable to "
+            "anyone"
+        )
 
     segments = normalized.split(".")
     for segment in segments:

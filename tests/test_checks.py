@@ -158,3 +158,41 @@ def test_a_policy_only_applies_to_the_principal_it_names():
         "anyone",
         "analytics.sales.q1",
     )
+
+
+# --- engine-private storage is denied, not merely ungranted ------------------
+
+
+def test_engine_private_storage_is_denied_to_a_workspace_owner():
+    """A covering grant is the whole point of this check.
+
+    `validate_pattern` refuses to issue a policy naming `$system`, but nobody
+    would need one: `analytics.*` matches `analytics.$system.relationships`
+    already. Without the deny, every workspace owner reads the relationship
+    store.
+    """
+    grants = [Grant(role="owner", pattern="analytics.*")]
+    assert can_perform_action(grants, "analytics.sales.q1", "READ")
+    for action in ("READ", "WRITE", "ALTER", "DROP", "CREATE", "GRANT"):
+        assert not can_perform_action(grants, "analytics.$system.relationships", action)
+
+
+def test_engine_private_storage_is_denied_inside_a_personal_namespace():
+    """Implicit grants are checked before issued ones, so the deny precedes both."""
+    assert not can_perform_action([], "personal.alice.$system.relationships", "READ", identity="alice")
+
+
+def test_engine_private_storage_is_denied_to_platform_identities():
+    assert not can_perform_action([], "public.$system.relationships", "READ", identity="xb500")
+
+
+def test_engine_private_storage_cannot_be_administered():
+    policies = [Policy(principal="alice", role="owner", pattern="analytics.*")]
+    assert not can_administer_pattern(policies, "alice", "analytics.$system.relationships")
+
+
+def test_dollar_prefixed_local_relations_are_unaffected():
+    """`$planets`, `$grants` and friends carry no dot and are session-local
+    reads, decided before the deny is reached."""
+    assert can_perform_action([], "$planets", "READ")
+    assert not can_perform_action([], "$planets", "WRITE")

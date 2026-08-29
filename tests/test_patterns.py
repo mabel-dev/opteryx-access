@@ -2,6 +2,7 @@ import pytest
 
 from opteryx_access.exceptions import InvalidPatternError
 from opteryx_access.patterns import escape_glob
+from opteryx_access.patterns import is_engine_private
 from opteryx_access.patterns import is_literal_segment
 from opteryx_access.patterns import normalize
 from opteryx_access.patterns import pattern_segments
@@ -172,3 +173,26 @@ def test_a_fully_literal_pattern_matches_only_itself():
     assert resource_matches("analytics.sales.q1", "analytics.sales.q1")
     assert not resource_matches("analytics.sales.q1x", "analytics.sales.q1")
     assert not resource_matches("analytics.sales", "analytics.sales.q1")
+
+
+def test_engine_private_names_are_recognised_anywhere_in_the_resource():
+    assert is_engine_private("analytics.$system.relationships")
+    assert is_engine_private("analytics.$system")
+    assert is_engine_private("$system.a.b")
+    assert is_engine_private("ANALYTICS.$System.Relationships")
+    assert not is_engine_private("analytics.system.relationships")
+    assert not is_engine_private("analytics.sales.q1")
+
+
+def test_an_ordinary_workspace_pattern_still_matches_engine_private_storage():
+    # The reason `is_engine_private` has to be a deny rather than a validation
+    # rule: refusing to ISSUE `analytics.$system.*` changes nothing here,
+    # because a `*` covers everything below it.
+    assert resource_matches("analytics.$system.relationships", "analytics.*")
+
+
+def test_engine_private_patterns_cannot_be_issued():
+    with pytest.raises(InvalidPatternError, match="engine-private"):
+        validate_pattern("analytics.$system.relationships")
+    with pytest.raises(InvalidPatternError, match="engine-private"):
+        validate_pattern("analytics.$system.*")

@@ -30,6 +30,7 @@ from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.patterns import escape_glob
+from opteryx_access.patterns import is_engine_private
 from opteryx_access.patterns import normalize
 from opteryx_access.patterns import resource_matches
 
@@ -115,6 +116,18 @@ def can_perform_action(
     if resource.count(".") == 0:
         return action == "READ"
 
+    # Engine-private storage is denied here, before a single grant is looked
+    # at, and for every action and every identity including the platform ones.
+    # `validate_pattern` already refuses to issue a policy naming `$system`,
+    # but that is not the same guarantee: a pattern's `*` covers everything
+    # below it, so an ordinary `ws.*` owner grant matches
+    # `ws.$system.relationships` and would let every workspace owner read the
+    # relationship store. Nothing is meant to reach it through this package at
+    # all, so it is refused by name rather than by nobody happening to hold a
+    # matching grant.
+    if is_engine_private(resource):
+        return False
+
     for implicit in implicit_grants(identity):
         if resource_matches(resource, implicit.pattern):
             return action_allowed_for_role(implicit.role, action)
@@ -145,6 +158,9 @@ def can_perform_workspace_action(
     (`ws.coll.*`) does not -- stripped of its trailing `.*` it reduces to
     `ws.coll`, which is not the workspace itself.
     """
+    if is_engine_private(workspace):
+        return False
+
     for grant in grants:
         if not action_allowed_for_role(grant.role, action):
             continue
@@ -171,6 +187,8 @@ def can_administer_pattern(policies: Iterable[Policy], identity: str, pattern: s
     resolves to the identity it was meant for.
     """
     if not pattern:
+        return False
+    if is_engine_private(pattern):
         return False
     identity = normalize(identity)
     for policy in policies:
