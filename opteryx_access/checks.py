@@ -116,15 +116,13 @@ def can_perform_action(
     if resource.count(".") == 0:
         return action == "READ"
 
-    # Engine-private storage is denied here, before a single grant is looked
-    # at, and for every action and every identity including the platform ones.
-    # `validate_pattern` already refuses to issue a policy naming `$system`,
-    # but that is not the same guarantee: a pattern's `*` covers everything
-    # below it, so an ordinary `ws.*` owner grant matches
-    # `ws.$system.relationships` and would let every workspace owner read the
-    # relationship store. Nothing is meant to reach it through this package at
-    # all, so it is refused by name rather than by nobody happening to hold a
-    # matching grant.
+    # `$`-prefixed names are denied here, before a single grant is looked at,
+    # and for every action and every identity including the platform ones.
+    # `validate_pattern` already refuses to ISSUE a policy naming one, but that
+    # is not the same guarantee: a pattern's `*` covers everything below it, so
+    # an ordinary `ws.*` owner grant matches `ws.$anything`. Nothing is stored
+    # under such a name today -- see ENGINE_PRIVATE_PREFIX in patterns.py for
+    # why the reservation is made ahead of the need.
     if is_engine_private(resource):
         return False
 

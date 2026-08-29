@@ -48,15 +48,20 @@ RESERVED_WORKSPACES: tuple[str, ...] = ("public", "personal")
 # can't be granted as an independent resource.
 INFORMATION_SCHEMA_COLLECTION = "information_schema"
 
-# Engine-private storage lives under a collection whose name starts with this:
-# the declared-relationship store at `<workspace>/$system/relationships` is the
-# first, and anything placed beside it inherits the same treatment.
+# `$` is reserved for engine-private names, and no grant may reach one.
 #
-# It is not a dataset. It is in no listing, has no catalog entry, and cannot be
-# named in a query -- the engine's own identifier grammar rejects `$` in a
-# relation name, so a reader cannot even spell it. This package must not be the
-# weak link in that: see `is_engine_private`, which is a DENY consulted before
-# any grant, not merely an absence of one.
+# Nothing is stored under such a name today. Declared relationships -- the case
+# that prompted this -- live in a `relationships` subcollection on the dataset
+# document in the catalog, which is not in the resource namespace these
+# patterns describe, and so was never reachable by a grant to begin with. This
+# is a reservation, not the closing of a live hole: it exists so that anything
+# later placed under a `$` name is unreachable from the moment it lands rather
+# than depending on someone remembering to deny it then.
+#
+# It has to be a DENY consulted before any grant, not merely the absence of a
+# matching one: a pattern's `*` covers everything below it, so an ordinary
+# `ws.*` owner grant would match `ws.$anything` perfectly well. See
+# `is_engine_private`.
 ENGINE_PRIVATE_PREFIX = "$"
 
 
@@ -92,12 +97,11 @@ def is_engine_private(resource: str) -> bool:
     collection: a resource is denied on the strength of how it is spelled, and
     checking one position would leave the others to chance.
 
-    This exists because refusing to ISSUE a policy over `$system` is not
-    enough. A pattern's `*` covers everything below it, so an ordinary
-    workspace grant of `ws.*` matches `ws.$system.relationships` perfectly
-    well. Without a deny consulted first, every workspace owner could read the
-    relationship store, which is the one thing its placement was chosen to
-    prevent.
+    This exists because refusing to ISSUE a policy over a `$` name is not
+    enough on its own. A pattern's `*` covers everything below it, so an
+    ordinary workspace grant of `ws.*` matches `ws.$anything` perfectly well,
+    and a deny consulted first is what makes the reservation hold for names
+    that do not exist yet.
     """
     return any(
         segment.startswith(ENGINE_PRIVATE_PREFIX) for segment in normalize(resource).split(".")
