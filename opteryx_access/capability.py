@@ -21,9 +21,10 @@ Most checks are answered from that context alone. The exceptions:
 answered from this package's own list of platform identities;
 `can_principal_perform_action` is asked about somebody who is not the caller,
 whose policies this process was never issued; and grant administration
-(`apply_grant`/`apply_revoke`/`grants_on`/`effective_grants_on`, behind the
-engine's `GRANT`/`REVOKE`/`SHOW GRANTS ON`/`SHOW EFFECTIVE GRANTS ON`
-statements) reads and writes live policy state. A capability that has to answer any of those is constructed with a
+(`apply_grant`/`apply_revoke`/`grants_on`/`effective_grants_on`/
+`effective_grants_in`, behind the engine's `GRANT`/`REVOKE`/`SHOW GRANTS ON`/
+`SHOW EFFECTIVE GRANTS ON` statements and its `information_schema.grants`
+table) reads and writes live policy state. A capability that has to answer any of those is constructed with a
 `PolicyStore`:
 
     opteryx.register_permissions_capability(opteryx_access.capability(store))
@@ -46,6 +47,8 @@ from opteryx_access.grants import grants_for_principal
 from opteryx_access.grants import revoke_grant
 from opteryx_access.models import Grant
 from opteryx_access.models import parse_policy_claim
+from opteryx_access.exceptions import InvalidPatternError
+from opteryx_access.patterns import is_engine_private
 from opteryx_access.patterns import normalize
 from opteryx_access.patterns import pattern_level
 from opteryx_access.patterns import resource_matches
@@ -397,6 +400,117 @@ class PermissionsCapability:
             f"list the effective grants on {pattern!r}",
             covering=True,
         )
+
+
+    def effective_grants_in(self, execution_context, workspace: str, objects: list) -> list[dict]:
+        """The rows behind the engine's `information_schema.grants`: for each
+        object in `objects`, every stored policy in `workspace` that covers
+        it -- `effective_grants_on` asked once per object, over ONE read of
+        the policy store.
+
+        `objects` are object patterns as the SQL surface speaks them (`w.*`,
+        `w.c.*`, `w.c.d`), built by the engine from its catalog listing. That
+        listing is why this member exists: `effective_grants_on` reads the
+        store twice per call, so walking a workspace of a hundred datasets
+        through it would read the same policy documents two hundred times.
+        Here the actor's policies and the workspace's are each read once.
+
+        Every stored policy is ALSO reported at its own pattern, whether or
+        not the engine asked about it. A policy on a dataset that has since
+        been dropped, or a collection nobody has created yet, names no
+        catalog object the engine could have enumerated -- and a listing of
+        what is granted that omits exactly the grants pointing at nothing is
+        the one an administrator most needs to be complete. `SHOW GRANTS ON
+        WORKSPACE` lists them; so does this.
+
+        Rows carry the four columns of the two SHOW statements plus `object`
+        (the pattern the row answers for, normalized, so the engine can join
+        it back to what it asked) and `explicit`: True when the policy is
+        stored AT the object -- the same exact-pattern test `grants_on`
+        applies -- and False when it merely covers the object from above.
+        One row per covering policy, as for the statements, and for the same
+        reason: which policy grants the access is what has to change to take
+        it away.
+
+        Gated per object with `can_administer_pattern`, exactly as the two
+        statements are gated. Unlike them, an object the actor may not
+        administer is SKIPPED rather than refused: a statement names one
+        object and refusing it is the answer, while a listing over a
+        workspace shows what the actor may see, as every information_schema
+        table does. An anonymous session may see none of it and gets no
+        rows. The store is still required -- no store is "cannot answer",
+        never an empty table.
+
+        For a collection or a dataset the rows are `effective_grants_on`'s
+        exactly. For the WORKSPACE object they are not: the statement lists
+        every policy in the workspace, whatever level it is held at, while
+        here the workspace row holds only the policies that cover the
+        workspace as an object (`w.*`). Every other policy is reported at its
+        own pattern instead, once, as explicit -- so "everything stored in the
+        workspace" is the explicit rows, and a narrower policy is never shown
+        as if it reached the workspace above it.
+
+        Object patterns are normalized, not validated. They name what the
+        catalog holds rather than what a policy may be issued over: a dataset
+        whose name no policy could spell exactly is still covered by `w.*`,
+        and `can_perform_action` would say so for a real query. Engine-private
+        names are the exception, refused here as they are everywhere. Objects
+        outside `workspace` are a caller error, not a silent miss.
+        """
+        store = self._administration_store(f"list the effective grants in {workspace!r}")
+        workspace = normalize(workspace)
+        if not workspace:
+            raise InvalidPatternError("effective_grants_in needs the workspace to list")
+
+        asked: list[str] = []
+        for pattern in objects:
+            normalized = normalize(pattern)
+            if not normalized or is_engine_private(normalized):
+                continue
+            if normalized.split(".", 1)[0] != workspace:
+                raise InvalidPatternError(
+                    f"effective_grants_in lists one workspace at a time: {pattern!r} is not "
+                    f"in {workspace!r}"
+                )
+            if normalized not in asked:
+                asked.append(normalized)
+
+        identity = _identity(execution_context)
+        if not identity:
+            return []
+        actor = normalize(identity)
+
+        actor_policies = store.list_policies_for_principal(workspace, actor)
+        policies = sorted(
+            store.list_policies(workspace),
+            key=lambda policy: (normalize(policy.principal), normalize(policy.pattern)),
+        )
+
+        # What was asked about, in the order asked, then every stored pattern
+        # not already among them -- so nothing granted goes unlisted.
+        for policy in policies:
+            held_at = normalize(policy.pattern)
+            if held_at not in asked and not is_engine_private(held_at):
+                asked.append(held_at)
+
+        rows = []
+        for object_pattern in asked:
+            if not can_administer_pattern(actor_policies, actor, object_pattern):
+                continue
+            for policy in policies:
+                if not resource_matches(object_pattern, policy.pattern):
+                    continue
+                rows.append(
+                    {
+                        "object": object_pattern,
+                        "user": policy.principal,
+                        "pattern": policy.pattern,
+                        "level": pattern_level(policy.pattern) or "",
+                        "role": policy.role,
+                        "explicit": normalize(policy.pattern) == object_pattern,
+                    }
+                )
+        return rows
 
 
 def capability(store: PolicyStore | None = None) -> PermissionsCapability:

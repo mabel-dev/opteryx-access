@@ -1,5 +1,7 @@
 """The capability's grant-administration surface: apply_grant, apply_revoke,
-grants_on -- the members behind opteryx's GRANT / REVOKE / SHOW GRANTS ON.
+grants_on, effective_grants_on, effective_grants_in -- the members behind
+opteryx's GRANT / REVOKE / SHOW [EFFECTIVE] GRANTS ON and its
+information_schema.grants table.
 
 Thin delegations by design: the rules are tested where they live
 (test_grants.py, test_revoke_grant.py). What is pinned here is the seam --
@@ -285,3 +287,175 @@ def test_effective_grants_on_agrees_with_what_can_perform_action_decides():
             identity=row["user"],
         )
     assert "ginny" not in {row["user"] for row in rows}
+
+
+# --- effective_grants_in
+
+
+def _seeded_workspace():
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.ops.*"))
+    store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.ops.audit_log"))
+    store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.sales.*"))
+    return store
+
+
+def _shape(rows):
+    return [(r["object"], r["user"], r["pattern"], r["level"], r["role"], r["explicit"]) for r in rows]
+
+
+def test_effective_grants_in_answers_a_collection_or_dataset_as_effective_grants_on_would():
+    store = _seeded_workspace()
+    cap = capability(store)
+    objects = ["analytics.ops.*", "analytics.ops.audit_log", "analytics.sales.q1"]
+
+    rows = cap.effective_grants_in(_alice(), "analytics", objects)
+
+    for object_pattern in objects:
+        per_object = [
+            {k: r[k] for k in ("user", "pattern", "level", "role")}
+            for r in rows
+            if r["object"] == object_pattern
+        ]
+        assert per_object == cap.effective_grants_on(_alice(), object_pattern), object_pattern
+
+
+def test_effective_grants_in_reports_the_workspace_as_an_object_not_as_the_whole_listing():
+    # `SHOW EFFECTIVE GRANTS ON WORKSPACE` lists every policy at every level.
+    # Here the workspace row is the policies that cover the workspace itself;
+    # the narrower ones are each reported at their own pattern instead.
+    rows = capability(_seeded_workspace()).effective_grants_in(_alice(), "analytics", ["analytics.*"])
+    at_the_workspace = [r for r in rows if r["object"] == "analytics.*"]
+    assert _shape(at_the_workspace) == [
+        ("analytics.*", "alice", "analytics.*", "workspace", "owner", True),
+    ]
+    assert ("analytics.ops.*", "bob", "analytics.ops.*", "collection", "writer", True) in _shape(rows)
+
+
+def test_effective_grants_in_says_whether_each_policy_is_stored_at_the_object():
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        _alice(), "analytics", ["analytics.ops.audit_log"]
+    )
+    at_the_dataset = [r for r in rows if r["object"] == "analytics.ops.audit_log"]
+    assert _shape(at_the_dataset) == [
+        ("analytics.ops.audit_log", "alice", "analytics.*", "workspace", "owner", False),
+        ("analytics.ops.audit_log", "bob", "analytics.ops.*", "collection", "writer", False),
+        ("analytics.ops.audit_log", "ginny", "analytics.ops.audit_log", "dataset", "reader", True),
+    ]
+
+
+def test_effective_grants_in_reads_the_store_once_however_many_objects():
+    class CountingStore(FakePolicyStore):
+        reads = 0
+
+        def list_policies(self, workspace):
+            CountingStore.reads += 1
+            return super().list_policies(workspace)
+
+        def list_policies_for_principal(self, workspace, principal):
+            CountingStore.reads += 1
+            return super().list_policies_for_principal(workspace, principal)
+
+    store = CountingStore()
+    store.seed("analytics", Policy(principal="alice", role="owner", pattern="analytics.*"))
+    objects = [f"analytics.ops.dataset_{i}" for i in range(50)]
+
+    capability(store).effective_grants_in(_alice(), "analytics", objects)
+
+    assert CountingStore.reads == 2
+
+
+def test_effective_grants_in_lists_every_stored_policy_at_its_own_pattern():
+    # A grant on something the catalog no longer holds is exactly the grant a
+    # listing must not lose. Nothing asked about `analytics.sales.*`, and
+    # ginny's policy there is still reported, explicitly, at itself.
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        _alice(), "analytics", ["analytics.ops.audit_log"]
+    )
+    assert ("analytics.sales.*", "ginny", "analytics.sales.*", "collection", "reader", True) in _shape(rows)
+    # And the workspace owner's own policy, at the workspace.
+    assert ("analytics.*", "alice", "analytics.*", "workspace", "owner", True) in _shape(rows)
+
+
+def test_effective_grants_in_keeps_the_asked_order_then_appends_stored_patterns():
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        _alice(), "analytics", ["analytics.ops.audit_log", "analytics.*"]
+    )
+    seen = []
+    for row in rows:
+        if row["object"] not in seen:
+            seen.append(row["object"])
+    assert seen[:2] == ["analytics.ops.audit_log", "analytics.*"]
+    assert set(seen[2:]) == {"analytics.ops.*", "analytics.sales.*"}
+
+
+def test_effective_grants_in_skips_objects_the_actor_may_not_administer():
+    # bob owns only `analytics.ops.*`: he sees the ops collection and what is
+    # under it, and nothing about the workspace or its other collections --
+    # skipped, not refused, because this is a listing and not a statement.
+    store = _store()
+    store.seed("analytics", Policy(principal="bob", role="owner", pattern="analytics.ops.*"))
+    store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.sales.*"))
+    rows = capability(store).effective_grants_in(
+        FakeExecutionContext(user="bob"),
+        "analytics",
+        ["analytics.*", "analytics.ops.*", "analytics.ops.audit_log", "analytics.sales.*"],
+    )
+    assert {r["object"] for r in rows} == {"analytics.ops.*", "analytics.ops.audit_log"}
+    assert "ginny" not in {r["user"] for r in rows}
+
+
+def test_effective_grants_in_gives_an_anonymous_session_nothing():
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        FakeExecutionContext(user=None), "analytics", ["analytics.*"]
+    )
+    assert rows == []
+
+
+def test_effective_grants_in_still_requires_a_store():
+    with pytest.raises(PolicyStoreRequiredError):
+        capability().effective_grants_in(_alice(), "analytics", ["analytics.*"])
+
+
+def test_effective_grants_in_refuses_an_object_from_another_workspace():
+    from opteryx_access.exceptions import InvalidPatternError
+
+    with pytest.raises(InvalidPatternError):
+        capability(_seeded_workspace()).effective_grants_in(
+            _alice(), "analytics", ["analytics.*", "billing.*"]
+        )
+
+
+def test_effective_grants_in_does_not_validate_object_names_only_normalizes():
+    # A dataset the catalog holds under a name no policy could spell exactly
+    # is still reached by the workspace owner's `analytics.*`, and a real
+    # query would let alice read it; the listing says the same.
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        _alice(), "analytics", ["Analytics.ops.Odd-Name"]
+    )
+    assert ("analytics.ops.odd-name", "alice", "analytics.*", "workspace", "owner", False) in _shape(rows)
+
+
+def test_effective_grants_in_never_lists_an_engine_private_object():
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        _alice(), "analytics", ["analytics.ops.$secrets", "analytics.ops.audit_log"]
+    )
+    assert not any(r["object"].startswith("analytics.ops.$") for r in rows)
+
+
+def test_effective_grants_in_agrees_with_what_can_perform_action_decides():
+    from opteryx_access.checks import can_perform_action
+    from opteryx_access.models import Grant
+
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        _alice(), "analytics", ["analytics.ops.audit_log", "analytics.sales.q1"]
+    )
+    for row in rows:
+        if row["object"].endswith(".*"):
+            continue
+        assert can_perform_action(
+            [Grant(role=row["role"], pattern=row["pattern"])],
+            row["object"],
+            "READ",
+            identity=row["user"],
+        ), row
