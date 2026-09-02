@@ -40,8 +40,8 @@ def test_action_roles_matrix_matches_declared_sets_exactly():
 
 def test_no_role_can_perform_an_action_it_is_not_explicitly_listed_for():
     # Belt-and-suspenders on the matrix test above: nobody may DROP/ALTER/
-    # MANIFEST without being exactly "owner".
-    for action in ("DROP", "ALTER", "MANIFEST"):
+    # MANIFEST/AUTOMATE without being exactly "owner".
+    for action in ("DROP", "ALTER", "MANIFEST", "AUTOMATE"):
         for role in ROLES:
             if role != "owner":
                 assert not action_allowed_for_role(role, action), (role, action)
@@ -226,7 +226,7 @@ def test_platform_identities_cannot_drop_or_grant_in_public():
     # The exception is writer-tier. Nothing about being a platform identity
     # confers the owner-tier actions on a namespace nobody owns.
     for identity in ("federator", "xb500"):
-        for action in ("DROP", "ALTER", "GRANT", "REVOKE", "MANIFEST"):
+        for action in ("DROP", "ALTER", "GRANT", "REVOKE", "MANIFEST", "AUTOMATE"):
             assert not can_perform_action([], "public.security.cves", action, identity=identity)
 
 

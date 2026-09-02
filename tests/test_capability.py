@@ -389,7 +389,7 @@ def test_a_dotless_relation_is_readable_and_nothing_more():
     context = FakeExecutionContext(user="alice")
     assert cap.can_perform_action(context, "$grants", "READ")
     assert cap.can_perform_action(context, "orders", "READ")
-    for action in ("WRITE", "DELETE", "DROP", "ALTER", "CREATE", "MANIFEST"):
+    for action in ("WRITE", "DELETE", "DROP", "ALTER", "CREATE", "MANIFEST", "AUTOMATE"):
         assert not cap.can_perform_action(context, "$grants", action), action
 
 

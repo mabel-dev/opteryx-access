@@ -34,6 +34,17 @@ ACTION_ROLES = {
     # SHOW MANIFEST FOR exposes file paths and layout (bucket/partition
     # structure), not just data -- stricter than a normal READ.
     "MANIFEST": {"owner"},
+    # Standing automation on a relation: creating, dropping, suspending,
+    # resuming, or re-pinning the identity of a task or trigger, and creating
+    # a materialized view (which lands a refresh trigger on every source it
+    # reads). An INSERT is over when it finishes; a trigger runs unattended,
+    # indefinitely, as a pinned identity, on the owner's compute, and can write
+    # to other relations and fire further triggers. That is a commitment about
+    # what the relation DOES to the world, not what is in it -- far closer to
+    # GRANT than to WRITE -- so it is the owner's to make. Every engine with
+    # triggers puts creating one above plain write (Postgres and MySQL have a
+    # separate TRIGGER privilege; Snowflake gates tasks on EXECUTE TASK).
+    "AUTOMATE": {"owner"},
     # Granting and revoking access to a resource is the owner's to do -- the
     # same tier as DROP, and for the same reason: it changes what the relation
     # fundamentally is to everyone else, not just what is in it.

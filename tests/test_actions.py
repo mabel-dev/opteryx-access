@@ -21,6 +21,24 @@ def test_drop_and_alter_are_owner_only():
     assert allowed_roles("ALTER") == {"owner"}
 
 
+def test_automation_is_owner_only():
+    # A task or trigger is a standing commitment that runs unattended as a
+    # pinned identity on the owner's compute; a writer may fill a relation but
+    # may not decide what it does on its own.
+    assert allowed_roles("AUTOMATE") == {"owner"}
+    assert not action_allowed_for_role("writer", "AUTOMATE")
+    assert not action_allowed_for_role("reader", "AUTOMATE")
+
+
+def test_writer_tier_is_exactly_the_artefact_actions():
+    # The line between writer and owner, pinned: a writer creates and fills
+    # artefacts; everything that changes what a relation IS to others -- its
+    # shape, its existence, its layout, who may read it, what it does on its
+    # own -- is the owner's.
+    writer_actions = {action for action in ACTION_ROLES if "writer" in ACTION_ROLES[action]}
+    assert writer_actions == {"READ", "WRITE", "UPDATE", "DELETE", "CREATE", "REFRESH"}
+
+
 def test_reader_may_only_read():
     for action in ACTION_ROLES:
         expected = action == "READ"

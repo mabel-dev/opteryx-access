@@ -58,7 +58,7 @@ is meant to stop.
 | Module | Ported from | Purpose |
 |---|---|---|
 | `roles.py` | `policy.opteryx/app/models/policy.py` | The canonical `ROLES = ("owner", "writer", "reader")` and `role_outranks_or_equals`, the privilege ordering used only for redundancy detection. |
-| `actions.py` | `opteryx-core/opteryx/managers/permissions/__init__.py` | `ACTION_ROLES`: which roles may perform `READ`/`WRITE`/`DELETE`/`CREATE`/`DROP`/`ALTER`/`REFRESH`/`MANIFEST`, plus `GRANT`/`REVOKE` (new -- makes policy-administration authority explicit in the same table instead of an implicit rule elsewhere). |
+| `actions.py` | `opteryx-core/opteryx/managers/permissions/__init__.py` | `ACTION_ROLES`: which roles may perform `READ`/`WRITE`/`DELETE`/`CREATE`/`DROP`/`ALTER`/`REFRESH`/`MANIFEST`, plus `GRANT`/`REVOKE` (new -- makes policy-administration authority explicit in the same table instead of an implicit rule elsewhere) and `AUTOMATE` (new -- standing automation is the owner's to create; see "Roles" below). |
 | `patterns.py` | `policy.opteryx/app/models/policy.py` + `app/routes/v1/access.py` | What a pattern and a principal may look like, and how a pattern matches: `validate_pattern`, `validate_principal`, `resource_matches` (see "Patterns and principals" below). |
 | `models.py` | `authenticate.opteryx/app/policies.py` | `Grant` (role+pattern, the JWT-carried shape) and `Policy` (principal+role+pattern+metadata, the stored shape), plus `parse_policy_claim` for the `[role, pattern]` pairs a token carries. |
 | `checks.py` | `opteryx-core`'s `can_perform_action`/`can_perform_workspace_action` + `policy.opteryx`'s `_check_pattern_access`/`_check_workspace_access` | The evaluation layer: data-plane checks over `Grant`s, administrative-plane checks over `Policy` documents. |
@@ -95,6 +95,115 @@ Two consequences worth relying on:
   thought unauthorized, would be enforcing policy somewhere none of the tests
   for those rules can see it. Every rule lives in `grants.py`, tested against
   an in-memory fake.
+
+## Roles: reader, writer, owner
+
+Three roles, and the line between each pair is a sentence:
+
+- **A reader uses the data.** This is the role for the masses -- everyone
+  consuming a data product. It confers `SELECT` and `EXPLAIN` and nothing
+  else: no creating, no changing, no removing, nothing that outlives the
+  query.
+- **A writer changes what is in a relation.** Rows, and the artefacts that
+  hold or derive them: tables, views, comments, compaction. Writer work is
+  attended and finite -- it is over when the statement finishes -- and what
+  it makes can be recreated from its own text.
+- **An owner changes what a relation is to everyone else.** Its shape, its
+  name, its existence, its physical layout, who may read it, and what it does
+  on its own. Each of those alters the contract a reader depends on, or the
+  set of readers, so each is the owner's.
+
+`ACTION_ROLES` states this per action:
+
+| Action | Roles | What it covers |
+|---|---|---|
+| `READ` | reader, writer, owner | `SELECT`, `EXPLAIN`, listing existence and shape |
+| `WRITE`, `UPDATE`, `DELETE` | writer, owner | `INSERT`, `MERGE`, `TRUNCATE`, `OPTIMIZE`, `COMMENT ON`, redefining a view |
+| `CREATE` | writer, owner | New tables, collections, and views |
+| `REFRESH` | writer, owner | Rebuilding a materialized view from its stored definition |
+| `DROP` | owner | Removing a table, collection, or workspace -- destroys history |
+| `ALTER` | owner | Columns, types, renames, relationships, clustering, snapshots |
+| `MANIFEST` | owner | `SHOW MANIFEST FOR` -- file paths and storage layout |
+| `AUTOMATE` | owner | Tasks, triggers, and materialized views -- see below |
+| `GRANT`, `REVOKE` | owner | Who else holds a role here |
+
+### Automation is owner-tier
+
+`AUTOMATE` gates creating, dropping, suspending, resuming, and re-pinning the
+identity of a **task** or **trigger**, and creating a **materialized view**
+(which lands a refresh trigger on every source it reads). It is the one
+action whose placement is not obvious from "does this change rows", so the
+reasoning is worth stating.
+
+An `INSERT` is over when it finishes. A trigger is a standing commitment: it
+runs unattended, indefinitely, as a pinned identity, on the owner's compute,
+and it can write to other relations and fire further triggers. That is a
+decision about what the relation *does* to the world, not what is in it --
+much closer to `GRANT` than to `WRITE`. The person accountable for the
+relation is the person who should be asked before it starts acting on its
+own.
+
+Every engine with triggers agrees. Postgres and MySQL have a separate
+`TRIGGER` privilege that `INSERT`/`UPDATE` do not include; Snowflake gates
+tasks on `EXECUTE TASK`, an account-level grant handed out sparingly; SQL
+Server requires `ALTER` on the table. None of them treat "make this run by
+itself" as an ordinary write.
+
+A writer who wants derived data creates a plain view. Turning that into
+something that refreshes itself is precisely the moment an owner should be
+consulted, which is why `CREATE MATERIALIZED VIEW` is `AUTOMATE` rather than
+`CREATE`. `REFRESH` of an existing materialized view stays writer-tier: the
+decision to have it was taken, and authorized, when it was created.
+
+### What the information schema shows to whom
+
+`information_schema` is filtered per row by the caller's access to the row's
+subject, never gated per table. A user with no grants in a workspace gets
+empty results, not an error. Which action gates a row follows from the tiers
+above: a row is shown to whoever could act on what it describes.
+
+| Table | Shown at | Why |
+|---|---|---|
+| `tables`, `columns`, `schemata` | `READ` | Existence and shape are what a reader needs to write a query |
+| `column_relationships` | `READ` on **both** ends | A row names a second dataset; half-visible rows leak the far side |
+| `views` | `READ` for the row; `WRITE` for `view_definition` | The SQL names relations the reader may hold no grant on, and is a writer's to author |
+| `triggers` | `AUTOMATE` on the source table | Only an owner could have made one or can act on it |
+| `tasks` | `AUTOMATE` on the task | Nobody `SELECT`s from a task; its statement is automation |
+
+Two things follow from this that are easy to get wrong:
+
+- **`SHOW CREATE` moves with the listing.** A definition hidden in
+  `information_schema.views` and freely available through `SHOW CREATE VIEW`
+  is Postgres's `pg_catalog` side door: careful filtering in one place, the
+  same text one statement away. `SHOW CREATE VIEW` is `WRITE`, `SHOW CREATE
+  TASK` is `AUTOMATE`, `SHOW CREATE TABLE` stays `READ` (it is the column
+  list and clustering, not the manifest).
+- **The tier is per row, not per table.** Roles are held per pattern, so one
+  person is owner of some datasets and reader of others in the same
+  workspace. A table-level gate ("only owners may query `tasks`") has no
+  sensible meaning for them; the row-level one does.
+
+### Not yet enforced in opteryx-core
+
+This library declares `AUTOMATE`; the engine does not yet ask about it. The
+binder today gates tasks, triggers, and materialized views at `WRITE`/`CREATE`,
+and `information_schema` and `SHOW CREATE` gate every row and every
+definition at `READ`. Landing the tiers above in opteryx-core means:
+
+- `CREATE`/`DROP`/`ALTER ... TRIGGER`, `CREATE`/`DROP` `TASK`, and `CREATE
+  MATERIALIZED VIEW` gate on `AUTOMATE` instead of `WRITE`/`CREATE`.
+- `DROP VIEW` gates on `WRITE`, matching `CREATE VIEW` and `ALTER VIEW`. A
+  view is text and is recreatable, which is the reason `DROP` is owner-only
+  for tables and not a reason here.
+- `information_schema.triggers` and `.tasks` filter rows on `AUTOMATE`;
+  `information_schema.views` nulls `view_definition` unless `WRITE` holds.
+- `SHOW CREATE VIEW`/`MATERIALIZED VIEW` gate on `WRITE`, `SHOW CREATE TASK`
+  on `AUTOMATE`.
+
+Until then, `SHOW GRANTS` advertises `AUTOMATE` on owner rows -- derived from
+`ACTION_ROLES`, as every action is -- ahead of the engine consulting it. That
+is the intended direction: the table is the source of truth, and the engine
+catches up to it, rather than the other way round.
 
 ## Patterns and principals
 
@@ -430,6 +539,10 @@ Suggested order, each independently shippable:
 
    The adapter this needs is `opteryx_access.capability` -- **done**; see
    "The opteryx-core capability" below.
+
+   Still open on the engine side: adopting `AUTOMATE` and the
+   information-schema tiers -- see "Not yet enforced in opteryx-core" under
+   "Roles" above for the exact list of gates.
 
    Both packages support Python 3.11+, so a deployment can run them together
    on any version opteryx-core supports.
