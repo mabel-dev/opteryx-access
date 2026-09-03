@@ -24,6 +24,12 @@ Quick reference:
     # fetching what a principal holds, to hand to can_perform_action above:
     grants = grants_for_principal(store, workspace="analytics", identity="bob")
 
+Authority that does not fit the reader/writer/owner ladder -- running the
+operations of a workspace rather than reading its data -- arrives as a named,
+scoped ENTITLEMENT from the platform's identity system
+(`automation_admin::acme`); `opteryx_access.entitlements` declares what each
+kind confers.
+
 "May this identity administer grants here?" and "may this role perform this
 action on this resource?" are separate questions -- see `opteryx_access.checks`,
 which implements each over the input it needs.
@@ -44,7 +50,19 @@ from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
 from opteryx_access.checks import has_workspace_access
 from opteryx_access.checks import implicit_grants
+from opteryx_access.entitlements import ENTITLEABLE_ACTIONS
+from opteryx_access.entitlements import ENTITLEMENT_KINDS
+from opteryx_access.entitlements import SCOPE_SEPARATOR
+from opteryx_access.entitlements import entitlement_kinds
+from opteryx_access.entitlements import entitlement_permits
+from opteryx_access.entitlements import entitlement_permits_workspace_action
+from opteryx_access.entitlements import parse_entitlement_claim
+from opteryx_access.entitlements import parse_entitlement_name
+from opteryx_access.entitlements import resolve_entitlements
+from opteryx_access.entitlements import scope_pattern
+from opteryx_access.entitlements import validate_entitlement_actions
 from opteryx_access.exceptions import AccessDeniedError
+from opteryx_access.exceptions import InvalidActionError
 from opteryx_access.exceptions import InvalidPatternError
 from opteryx_access.exceptions import InvalidRoleError
 from opteryx_access.exceptions import OpteryxAccessError
@@ -62,12 +80,14 @@ from opteryx_access.grants import owned_by
 from opteryx_access.grants import revoke
 from opteryx_access.grants import revoke_grant
 from opteryx_access.grants import update_grant
+from opteryx_access.models import Entitlement
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.models import parse_policy_claim
 from opteryx_access.patterns import RESERVED_WORKSPACES
 from opteryx_access.patterns import pattern_level
 from opteryx_access.patterns import resource_matches
+from opteryx_access.patterns import validate_entitlement_pattern
 from opteryx_access.patterns import validate_pattern
 from opteryx_access.patterns import validate_principal
 from opteryx_access.roles import ROLES
@@ -79,12 +99,17 @@ __all__ = [
     "ACTION_ROLES",
     "AUDIT_LOGGER_NAME",
     "DATA_ACTIONS",
+    "ENTITLEABLE_ACTIONS",
+    "ENTITLEMENT_KINDS",
     "PLATFORM_IDENTITIES",
     "POLICY_ADMINISTRATION_ACTIONS",
     "RESERVED_WORKSPACES",
     "ROLES",
+    "SCOPE_SEPARATOR",
     "AccessDeniedError",
+    "Entitlement",
     "Grant",
+    "InvalidActionError",
     "InvalidPatternError",
     "InvalidRoleError",
     "OpteryxAccessError",
@@ -104,6 +129,9 @@ __all__ = [
     "can_perform_action",
     "can_perform_workspace_action",
     "capability",
+    "entitlement_kinds",
+    "entitlement_permits",
+    "entitlement_permits_workspace_action",
     "find_conflict",
     "grant",
     "grants_for_principal",
@@ -111,14 +139,20 @@ __all__ = [
     "implicit_grants",
     "is_valid_role",
     "owned_by",
+    "parse_entitlement_claim",
+    "parse_entitlement_name",
     "parse_policy_claim",
     "pattern_level",
+    "resolve_entitlements",
     "resource_matches",
     "revoke",
     "revoke_grant",
     "role_outranks_or_equals",
+    "scope_pattern",
     "set_audit_sink",
     "update_grant",
+    "validate_entitlement_actions",
+    "validate_entitlement_pattern",
     "validate_pattern",
     "validate_principal",
 ]

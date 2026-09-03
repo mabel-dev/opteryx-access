@@ -461,3 +461,91 @@ def test_a_platform_identity_can_still_read_what_it_maintains():
     cap = capability()
     context = FakeExecutionContext(user="federator")
     assert cap.can_perform_action(context, "public.gdelt.events", "WRITE")
+
+
+# --- entitlements ---------------------------------------------------------
+
+
+@dataclass
+class ContextWithEntitlements(FakeExecutionContext):
+    """The context once it carries the account's entitlement NAMES."""
+
+    entitlements: list = field(default_factory=list)
+
+
+def test_capability_honours_entitlement_names_from_the_execution_context():
+    permissions = capability()
+    entitled = ContextWithEntitlements(
+        user="alice",
+        entitlements=["user_admin", "automation_admin::public", "automation_admin::platform"],
+    )
+    assert permissions.can_perform_action(entitled, "public.ops.nightly", "AUTOMATE")
+    assert permissions.can_perform_action(entitled, "platform.ingest.hourly", "AUTOMATE")
+    # Operations, not data.
+    assert not permissions.can_perform_action(entitled, "platform.ingest.hourly", "READ")
+
+    # No attribute at all: read as "holds none", not as an error, so an engine
+    # that does not carry the claim yet behaves exactly as it did before.
+    assert not permissions.can_perform_action(
+        FakeExecutionContext(user="alice"), "public.ops.nightly", "AUTOMATE"
+    )
+
+
+def test_a_name_the_package_does_not_know_confers_nothing():
+    permissions = capability()
+    other = ContextWithEntitlements(user="alice", entitlements=["platform_admin", "data_admin"])
+    assert not permissions.can_perform_action(other, "public.ops.nightly", "AUTOMATE")
+    # A recognized kind with no scope confers nothing either -- and nothing
+    # everywhere, rather than something somewhere by default.
+    unscoped = ContextWithEntitlements(user="alice", entitlements=["automation_admin"])
+    assert not permissions.can_perform_action(unscoped, "public.ops.nightly", "AUTOMATE")
+
+
+def test_a_customer_workspace_gets_an_ops_admin_the_same_way():
+    permissions = capability()
+    ops = ContextWithEntitlements(user="ops_bot_minder", entitlements=["automation_admin::acme"])
+    assert permissions.can_perform_action(ops, "acme.pipelines.nightly", "AUTOMATE")
+    assert not permissions.can_perform_action(ops, "acme.pipelines.nightly", "READ")
+    assert not permissions.can_perform_action(ops, "public.ops.nightly", "AUTOMATE")
+
+
+def test_a_token_cannot_smuggle_a_permission_through_the_claim():
+    # The claim is names. A permission-shaped entry resolves to nothing.
+    permissions = capability()
+    forged = ContextWithEntitlements(
+        user="alice", entitlements=[{"actions": ["GRANT"], "pattern": "public.*"}]
+    )
+    assert not permissions.can_perform_action(forged, "public.ops.nightly", "GRANT")
+    assert not permissions.can_perform_action(forged, "public.ops.nightly", "AUTOMATE")
+
+
+def test_workspace_action_reads_the_same_claim():
+    permissions = capability()
+    entitled = ContextWithEntitlements(user="alice", entitlements=["automation_admin::platform"])
+    assert permissions.can_perform_workspace_action(entitled, "platform", "AUTOMATE")
+    assert not permissions.can_perform_workspace_action(entitled, "analytics", "AUTOMATE")
+
+
+def test_show_grants_reports_entitlements_first():
+    rows = capability().grants(
+        "alice", [], ["automation_admin::public", "automation_admin::platform"]
+    )
+    assert rows[0] == {
+        "pattern": "public.*",
+        "level": "workspace",
+        "role": "entitlement",
+        "actions": "AUTOMATE",
+    }
+    assert rows[1]["pattern"] == "platform.*"
+    # `entitlement` is deliberately not a role, so a reader cannot mistake the
+    # row for one that was granted.
+    assert rows[0]["role"] not in ROLES
+    # The implicit and issued grants still follow, unchanged.
+    assert [row["role"] for row in rows[2:]] == ["owner", "reader"]
+
+
+def test_show_grants_without_the_names_is_unchanged():
+    # An engine that does not pass them gets exactly the listing it got before
+    # entitlements existed.
+    assert capability().grants("alice", []) == capability().grants("alice", [], [])
+    assert all(row["role"] != "entitlement" for row in capability().grants("alice", []))

@@ -45,6 +45,16 @@ ACTION_ROLES = {
     # triggers puts creating one above plain write (Postgres and MySQL have a
     # separate TRIGGER privilege; Snowflake gates tasks on EXECUTE TASK).
     "AUTOMATE": {"owner"},
+    # Firing a task's SIGNAL trigger once, from outside - the webhook surface
+    # dispatch.opteryx exposes. The caller is the EVENT, not the context: the
+    # run assumes the trigger's pinned identity, exactly as a commit-fired run
+    # does, and the caller is only recorded as what fired it. So this is a
+    # writer-tier act like REFRESH - kicking off work that was already
+    # authorized when the trigger was armed - and deliberately not AUTOMATE,
+    # which is the owner's decision to have the standing automation at all. A
+    # low-privilege service account can signal a pipeline that runs as
+    # somebody else without being able to create, repoint or drop it.
+    "SIGNAL": {"writer", "owner"},
     # Granting and revoking access to a resource is the owner's to do -- the
     # same tier as DROP, and for the same reason: it changes what the relation
     # fundamentally is to everyone else, not just what is in it.

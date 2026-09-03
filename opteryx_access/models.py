@@ -1,4 +1,4 @@
-"""The two shapes a grant of access takes in this platform.
+"""The shapes access takes in this platform.
 
 `Grant` is the lightweight form carried inside a JWT's `policies` claim (see
 `authenticate.opteryx/app/policies.py::fetch_policies_for_principal`) -- just
@@ -9,10 +9,18 @@ small.
 `Policy` is the administrative form used when listing, creating, updating, or
 revoking policies -- it also carries who it applies to and (once stored) an
 id and audit timestamps.
+
+`Entitlement` is the third shape and the odd one out: actions on a pattern
+rather than a role on a pattern, held outside the role ladder entirely. It is
+never stored by this package -- entitlements are issued as NAMES by the
+platform's identity system, and `opteryx_access.entitlements` translates a
+name into these. That module is where what one means, and what one may
+confer, is decided.
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from typing import Any
 
@@ -47,6 +55,30 @@ class Policy:
     def as_grant(self) -> Grant:
         """This policy's (role, pattern), discarding principal and metadata."""
         return Grant(role=self.role, pattern=self.pattern)
+
+
+@dataclass
+class Entitlement:
+    """Actions a principal may perform on a pattern, held outside the roles.
+
+    `actions` is a frozenset of action names as `ACTION_ROLES` spells them --
+    uppercase, exactly. Nothing casefolds an action anywhere in this package
+    (`action_allowed_for_role("owner", "drop")` is False), so this does not
+    either.
+
+    Built by `opteryx_access.entitlements.resolve_entitlements` from a name the
+    identity system issued; `entitlement_id` and the timestamps are there for
+    a caller that mirrors these into a record of its own, and this package
+    never sets them.
+    """
+
+    principal: str
+    actions: frozenset[str] = field(default_factory=frozenset)
+    pattern: str = ""
+    entitlement_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str | None = None
 
 
 def parse_policy_claim(claims: dict) -> list[Grant]:

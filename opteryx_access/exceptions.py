@@ -63,3 +63,13 @@ class PolicyStoreRequiredError(OpteryxAccessError):
     no -- and a permission check that quietly returns "denied" because it could
     not read anything is how a check stops meaning what it says.
     """
+
+
+class InvalidActionError(OpteryxAccessError):
+    """An action name is unknown, or is not one an entitlement may confer.
+
+    Separate from `InvalidRoleError` because an entitlement names actions
+    rather than a role -- see `opteryx_access.entitlements`. Raised at import
+    time if `ENTITLEMENT_KINDS` declares something unusable, which is the
+    only place this package builds an entitlement.
+    """

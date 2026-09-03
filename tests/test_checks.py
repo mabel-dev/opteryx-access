@@ -179,7 +179,9 @@ def test_engine_private_storage_is_denied_to_a_workspace_owner():
 
 def test_engine_private_storage_is_denied_inside_a_personal_namespace():
     """Implicit grants are checked before issued ones, so the deny precedes both."""
-    assert not can_perform_action([], "personal.alice.$system.relationships", "READ", identity="alice")
+    assert not can_perform_action(
+        [], "personal.alice.$system.relationships", "READ", identity="alice"
+    )
 
 
 def test_engine_private_storage_is_denied_to_platform_identities():

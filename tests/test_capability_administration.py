@@ -264,9 +264,7 @@ def test_effective_grants_on_requires_a_store_and_an_identity():
     with pytest.raises(PolicyStoreRequiredError):
         capability().effective_grants_on(_alice(), "analytics.*")
     with pytest.raises(AccessDeniedError):
-        capability(_store()).effective_grants_on(
-            FakeExecutionContext(user=None), "analytics.*"
-        )
+        capability(_store()).effective_grants_on(FakeExecutionContext(user=None), "analytics.*")
 
 
 def test_effective_grants_on_agrees_with_what_can_perform_action_decides():
@@ -295,13 +293,17 @@ def test_effective_grants_on_agrees_with_what_can_perform_action_decides():
 def _seeded_workspace():
     store = _store()
     store.seed("analytics", Policy(principal="bob", role="writer", pattern="analytics.ops.*"))
-    store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.ops.audit_log"))
+    store.seed(
+        "analytics", Policy(principal="ginny", role="reader", pattern="analytics.ops.audit_log")
+    )
     store.seed("analytics", Policy(principal="ginny", role="reader", pattern="analytics.sales.*"))
     return store
 
 
 def _shape(rows):
-    return [(r["object"], r["user"], r["pattern"], r["level"], r["role"], r["explicit"]) for r in rows]
+    return [
+        (r["object"], r["user"], r["pattern"], r["level"], r["role"], r["explicit"]) for r in rows
+    ]
 
 
 def test_effective_grants_in_answers_a_collection_or_dataset_as_effective_grants_on_would():
@@ -324,12 +326,16 @@ def test_effective_grants_in_reports_the_workspace_as_an_object_not_as_the_whole
     # `SHOW EFFECTIVE GRANTS ON WORKSPACE` lists every policy at every level.
     # Here the workspace row is the policies that cover the workspace itself;
     # the narrower ones are each reported at their own pattern instead.
-    rows = capability(_seeded_workspace()).effective_grants_in(_alice(), "analytics", ["analytics.*"])
+    rows = capability(_seeded_workspace()).effective_grants_in(
+        _alice(), "analytics", ["analytics.*"]
+    )
     at_the_workspace = [r for r in rows if r["object"] == "analytics.*"]
     assert _shape(at_the_workspace) == [
         ("analytics.*", "alice", "analytics.*", "workspace", "owner", True),
     ]
-    assert ("analytics.ops.*", "bob", "analytics.ops.*", "collection", "writer", True) in _shape(rows)
+    assert ("analytics.ops.*", "bob", "analytics.ops.*", "collection", "writer", True) in _shape(
+        rows
+    )
 
 
 def test_effective_grants_in_says_whether_each_policy_is_stored_at_the_object():
@@ -372,7 +378,14 @@ def test_effective_grants_in_lists_every_stored_policy_at_its_own_pattern():
     rows = capability(_seeded_workspace()).effective_grants_in(
         _alice(), "analytics", ["analytics.ops.audit_log"]
     )
-    assert ("analytics.sales.*", "ginny", "analytics.sales.*", "collection", "reader", True) in _shape(rows)
+    assert (
+        "analytics.sales.*",
+        "ginny",
+        "analytics.sales.*",
+        "collection",
+        "reader",
+        True,
+    ) in _shape(rows)
     # And the workspace owner's own policy, at the workspace.
     assert ("analytics.*", "alice", "analytics.*", "workspace", "owner", True) in _shape(rows)
 
@@ -433,7 +446,14 @@ def test_effective_grants_in_does_not_validate_object_names_only_normalizes():
     rows = capability(_seeded_workspace()).effective_grants_in(
         _alice(), "analytics", ["Analytics.ops.Odd-Name"]
     )
-    assert ("analytics.ops.odd-name", "alice", "analytics.*", "workspace", "owner", False) in _shape(rows)
+    assert (
+        "analytics.ops.odd-name",
+        "alice",
+        "analytics.*",
+        "workspace",
+        "owner",
+        False,
+    ) in _shape(rows)
 
 
 def test_effective_grants_in_never_lists_an_engine_private_object():

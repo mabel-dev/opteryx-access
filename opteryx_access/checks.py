@@ -22,11 +22,20 @@ Administering grants is not a separate notion of authority with its own role
 list -- it is the `GRANT` action in `opteryx_access.actions.ACTION_ROLES`,
 checked the same way as any other action, so what it requires is stated once
 in that table alongside `DROP` and the rest.
+
+The data-plane checks also take `entitlements` (see
+`opteryx_access.entitlements`) -- authority over a namespace's OPERATIONS,
+carried as actions on a pattern rather than as a role, and resolved from the
+names the identity system issues. They are consulted before everything else,
+for the reason spelled out in `can_perform_action`.
 """
 
 from collections.abc import Iterable
 
 from opteryx_access.actions import action_allowed_for_role
+from opteryx_access.entitlements import entitlement_permits
+from opteryx_access.entitlements import entitlement_permits_workspace_action
+from opteryx_access.models import Entitlement
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.patterns import escape_glob
@@ -97,21 +106,35 @@ def can_perform_action(
     action: str,
     *,
     identity: str | None = None,
+    entitlements: Iterable[Entitlement] = (),
 ) -> bool:
-    """Whether any grant in `grants` (plus the identity's implicit grants)
-    permits `action` on `resource`.
+    """Whether any grant in `grants` (plus the identity's implicit grants, plus
+    any `entitlements` held) permits `action` on `resource`.
 
     A bare `resource` with no dot is treated as a local, in-session table:
     reading it is always allowed, nothing else is -- there is no workspace to
     check a policy against.
 
-    Implicit grants (see `implicit_grants`) are checked first and CAP what
-    they cover: a resource inside `public.` or inside the caller's own
-    `personal.` namespace is answered there and does not fall through to
-    `grants`. That is what makes `public.` read-only for everyone regardless
-    of what an issued policy might otherwise say about it -- everyone except
-    the platform identities that maintain it, whose writer grant is itself one
-    of the implicit grants and so is decided in the same pass.
+    Implicit grants (see `implicit_grants`) CAP what they cover: a resource
+    inside `public.` or inside the caller's own `personal.` namespace is
+    answered there and does not fall through to `grants`. That is what makes
+    `public.` read-only for everyone regardless of what an issued policy might
+    otherwise say about it -- everyone except the platform identities that
+    maintain it, whose writer grant is itself one of the implicit grants and so
+    is decided in the same pass.
+
+    Entitlements are consulted BEFORE both the cap and the issued grants, and
+    this order is the whole point of them. They say who runs the OPERATIONS of
+    a namespace, which is a decision above both -- above the cap, because
+    `AUTOMATE` on `public.*` is otherwise reachable by nobody at all; and
+    above an issued policy, because a workspace run by bots has no human owner
+    to grant it. See `opteryx_access.entitlements` for what each name confers
+    and why the table is short.
+
+    An entitlement is additive, never subtractive: it can only turn a False
+    into a True. What it cannot do is reach an engine-private name or confer
+    policy administration -- both refused in `entitlement_permits`, whatever
+    it was built from.
     """
     if resource.count(".") == 0:
         return action == "READ"
@@ -125,6 +148,10 @@ def can_perform_action(
     # why the reservation is made ahead of the need.
     if is_engine_private(resource):
         return False
+
+    for entitlement in entitlements:
+        if entitlement_permits(entitlement, resource, action):
+            return True
 
     for implicit in implicit_grants(identity):
         if resource_matches(resource, implicit.pattern):
@@ -143,6 +170,8 @@ def can_perform_workspace_action(
     grants: Iterable[Grant],
     workspace: str,
     action: str = "ALTER",
+    *,
+    entitlements: Iterable[Entitlement] = (),
 ) -> bool:
     """Whether any grant in `grants` permits `action` at the whole-workspace level.
 
@@ -155,9 +184,18 @@ def can_perform_workspace_action(
     does the bare name `ws`. A grant scoped to part of a workspace
     (`ws.coll.*`) does not -- stripped of its trailing `.*` it reduces to
     `ws.coll`, which is not the workspace itself.
+
+    `entitlements` are checked by the identical rule, over the actions they
+    confer instead of a role. Deliberately the same rule and not a laxer one:
+    an entitlement is narrower authority than a role, so it must not reach a
+    whole workspace from a pattern that would not have.
     """
     if is_engine_private(workspace):
         return False
+
+    for entitlement in entitlements:
+        if entitlement_permits_workspace_action(entitlement, workspace, action):
+            return True
 
     for grant in grants:
         if not action_allowed_for_role(grant.role, action):

@@ -139,15 +139,19 @@ def validate_principal(principal: str) -> str:
     return identity
 
 
-def validate_pattern(pattern: str) -> str:
-    """Check `pattern` is a usable resource pattern, returning it normalized.
+def _validate_pattern_shape(pattern: str) -> list[str]:
+    """The rules every pattern obeys, whatever it will be used for.
+
+    Shared by `validate_pattern` and `validate_entitlement_pattern` so the two
+    cannot drift on what a name may look like. Returns the normalized
+    segments; the caller adds whatever further rule its own use has.
 
     Enforces, in order: a non-empty pattern; no engine-private name (`$...`,
     which the generic segment rule would also reject, but with a message that
     does not say why); every segment either `*` or a literal name (which
     rejects empty segments like `a..b`, leading digits, and stray
-    punctuation); a literal workspace segment; a workspace that is not
-    reserved; and no grant over `information_schema`.
+    punctuation); a literal workspace segment; and no pattern over
+    `information_schema`.
 
     Raises:
         InvalidPatternError: with a message naming which rule was broken.
@@ -174,17 +178,10 @@ def validate_pattern(pattern: str) -> str:
                 "underscores"
             )
 
-    workspace = segments[0]
-    if workspace == WILDCARD_SEGMENT:
+    if segments[0] == WILDCARD_SEGMENT:
         raise InvalidPatternError(
             f"pattern {pattern!r} is not allowed: a policy must name the workspace it applies "
             "to, so the first part cannot be '*'"
-        )
-
-    if workspace in RESERVED_WORKSPACES:
-        raise InvalidPatternError(
-            f"pattern {pattern!r} is not allowed: the {workspace!r} workspace cannot be "
-            "granted through a policy"
         )
 
     if len(segments) > 1 and segments[1] == INFORMATION_SCHEMA_COLLECTION:
@@ -193,7 +190,46 @@ def validate_pattern(pattern: str) -> str:
             "virtual per-workspace resource and cannot be granted independently"
         )
 
-    return normalized
+    return segments
+
+
+def validate_pattern(pattern: str) -> str:
+    """Check `pattern` is a usable POLICY pattern, returning it normalized.
+
+    Everything in `_validate_pattern_shape`, plus the rule specific to
+    policies: the workspace must not be a reserved one. Access to a reserved
+    workspace is decided by a mechanism other than the access-policy
+    documents this package manages -- and, for the automation actions inside
+    one, by an entitlement (see `opteryx_access.entitlements`), which is why
+    that check lives here rather than in the shared shape.
+
+    Raises:
+        InvalidPatternError: with a message naming which rule was broken.
+    """
+    segments = _validate_pattern_shape(pattern)
+
+    workspace = segments[0]
+    if workspace in RESERVED_WORKSPACES:
+        raise InvalidPatternError(
+            f"pattern {pattern!r} is not allowed: the {workspace!r} workspace cannot be "
+            "granted through a policy"
+        )
+
+    return ".".join(segments)
+
+
+def validate_entitlement_pattern(pattern: str) -> str:
+    """Check `pattern` is a usable ENTITLEMENT pattern, returning it normalized.
+
+    `_validate_pattern_shape` and nothing more. An entitlement is deliberately
+    allowed over a reserved workspace -- covering `public.*` is most of the
+    reason entitlements exist, since that is precisely the namespace no policy
+    can reach and where the platform's own tasks and triggers live. Everything
+    else a pattern must be, it must still be here: `$`-prefixed names stay
+    unreachable, and `information_schema` stays ungrantable, because neither
+    of those reservations is about who is asking.
+    """
+    return ".".join(_validate_pattern_shape(pattern))
 
 
 def pattern_segments(pattern: str) -> tuple[str, str | None, str | None]:

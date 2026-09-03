@@ -40,14 +40,16 @@ from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
 from opteryx_access.checks import implicit_grants
+from opteryx_access.entitlements import parse_entitlement_claim
+from opteryx_access.entitlements import resolve_entitlements
 from opteryx_access.exceptions import AccessDeniedError
+from opteryx_access.exceptions import InvalidPatternError
 from opteryx_access.exceptions import PolicyStoreRequiredError
 from opteryx_access.grants import grant
 from opteryx_access.grants import grants_for_principal
 from opteryx_access.grants import revoke_grant
 from opteryx_access.models import Grant
 from opteryx_access.models import parse_policy_claim
-from opteryx_access.exceptions import InvalidPatternError
 from opteryx_access.patterns import is_engine_private
 from opteryx_access.patterns import normalize
 from opteryx_access.patterns import pattern_level
@@ -61,6 +63,27 @@ __all__ = ("PermissionsCapability", "capability")
 def _identity(execution_context) -> str | None:
     """The identity the session is running as, or None if anonymous."""
     return getattr(execution_context, "user", None)
+
+
+def _entitlements(execution_context) -> list:
+    """What the session's entitlement NAMES confer, as `Entitlement`s.
+
+    Read with `getattr(..., None)`, like `access_policies`: an engine that
+    does not carry the claim yet simply has none, and the deployment behaves
+    exactly as it did before entitlements existed rather than failing on a
+    missing attribute.
+
+    The context carries the names the identity system issued
+    (`["platform_admin", "automation_admin::acme"]`), not permissions. What a
+    kind confers is declared in `opteryx_access.entitlements.ENTITLEMENT_KINDS`
+    and its scope is in the name; names this package does not recognize
+    resolve to nothing -- an account holds plenty that mean something to other
+    services.
+    """
+    return parse_entitlement_claim(
+        {"entitlements": getattr(execution_context, "entitlements", None) or ()},
+        principal=_identity(execution_context) or "",
+    )
 
 
 def _grants(policies) -> list[Grant]:
@@ -114,6 +137,7 @@ class PermissionsCapability:
             resource,
             action,
             identity=_identity(execution_context),
+            entitlements=_entitlements(execution_context),
         )
 
     def can_perform_workspace_action(self, execution_context, workspace: str, action: str) -> bool:
@@ -121,6 +145,7 @@ class PermissionsCapability:
             _grants(getattr(execution_context, "access_policies", None) or ()),
             workspace,
             action,
+            entitlements=_entitlements(execution_context),
         )
 
     def can_principal_perform_action(self, principal: str, resource: str, action: str) -> bool:
@@ -142,6 +167,14 @@ class PermissionsCapability:
         uses, so a principal is judged by exactly the rules that would judge
         them if they ran the query themselves -- implicit grants included,
         since those are theirs whatever any store holds.
+
+        ENTITLEMENTS ARE NOT INCLUDED, and cannot be: a principal's
+        entitlement names live in the identity system, which this package does
+        not talk to, and there is no execution context here to read them off.
+        So this answers from policies and implicit grants -- narrower than the
+        truth for a principal who holds one. It matters little for what the
+        engine asks this: entitlements confer operational actions, and the
+        statements naming another principal ask whether they can READ.
 
         Raises:
             PolicyStoreRequiredError: no store was supplied at construction, so
@@ -191,7 +224,7 @@ class PermissionsCapability:
         """
         return normalize(principal) not in PLATFORM_IDENTITIES
 
-    def grants(self, identity: str, policies: list) -> list[dict]:
+    def grants(self, identity: str, policies: list, entitlements: list | None = None) -> list[dict]:
         """The rows behind `SHOW GRANTS`, in the order they are evaluated.
 
         Implicit grants come first because `can_perform_action` answers from
@@ -199,13 +232,36 @@ class PermissionsCapability:
         actually decides in, so a caller can see why `public.*` is read-only
         even where a broader policy appears below it.
 
+        Entitlements come first, ahead even of the implicit grants, for the
+        same reason: `can_perform_action` consults them first. Their `role`
+        column reads `entitlement` -- not a role, and deliberately not one of
+        `ROLES`, so a row conferring `AUTOMATE` on `public.*` cannot be
+        mistaken for a role that was granted. Their `actions` column is what
+        the entitlement actually confers, not what a role would.
+
+        `entitlements` is the session's entitlement NAMES, as the token
+        carries them. It is optional so that an engine which does not pass
+        them gets exactly the listing it got before entitlements existed,
+        rather than an error -- but a deployment whose tokens carry names and
+        whose `SHOW GRANTS` omits them reports less than it enforces.
+
         `level` labels each pattern the way the SQL surface speaks
         (workspace/collection/dataset, via `pattern_level`); a pattern that
         addresses no single object carries an empty label rather than a
         guessed one.
         """
+        rows = [
+            {
+                "pattern": entitlement.pattern,
+                "level": pattern_level(entitlement.pattern) or "",
+                "role": "entitlement",
+                "actions": ", ".join(sorted(entitlement.actions)),
+            }
+            for entitlement in resolve_entitlements(entitlements or (), principal=identity)
+        ]
+
         held = implicit_grants(identity) + _grants(policies)
-        return [
+        rows.extend(
             {
                 "pattern": held_grant.pattern,
                 "level": pattern_level(held_grant.pattern) or "",
@@ -213,7 +269,8 @@ class PermissionsCapability:
                 "actions": _actions_for(held_grant.role),
             }
             for held_grant in held
-        ]
+        )
+        return rows
 
     def _administration_store(self, doing: str) -> PolicyStore:
         """The store, or the refusal to guess without one.
@@ -329,9 +386,7 @@ class PermissionsCapability:
                     policy for policy in policies if resource_matches(pattern, policy.pattern)
                 ]
             else:
-                policies = [
-                    policy for policy in policies if normalize(policy.pattern) == pattern
-                ]
+                policies = [policy for policy in policies if normalize(policy.pattern) == pattern]
 
         policies.sort(key=lambda policy: (normalize(policy.principal), normalize(policy.pattern)))
         return [
@@ -400,7 +455,6 @@ class PermissionsCapability:
             f"list the effective grants on {pattern!r}",
             covering=True,
         )
-
 
     def effective_grants_in(self, execution_context, workspace: str, objects: list) -> list[dict]:
         """The rows behind the engine's `information_schema.grants`: for each
@@ -521,5 +575,10 @@ def capability(store: PolicyStore | None = None) -> PermissionsCapability:
     running statements that name another principal -- `ALTER MATERIALIZED VIEW
     ... OWNER TO` -- must supply one, and without it that check raises rather
     than guessing at an answer it has no way to reach.
+
+    Entitlements need no store at all: a session's entitlement names arrive
+    on the execution context, scoped by the platform that issued them, and
+    what each kind confers is declared in
+    `opteryx_access.entitlements.ENTITLEMENT_KINDS`.
     """
     return PermissionsCapability(store)

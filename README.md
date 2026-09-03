@@ -60,14 +60,15 @@ is meant to stop.
 | `roles.py` | `policy.opteryx/app/models/policy.py` | The canonical `ROLES = ("owner", "writer", "reader")` and `role_outranks_or_equals`, the privilege ordering used only for redundancy detection. |
 | `actions.py` | `opteryx-core/opteryx/managers/permissions/__init__.py` | `ACTION_ROLES`: which roles may perform `READ`/`WRITE`/`DELETE`/`CREATE`/`DROP`/`ALTER`/`REFRESH`/`MANIFEST`, plus `GRANT`/`REVOKE` (new -- makes policy-administration authority explicit in the same table instead of an implicit rule elsewhere) and `AUTOMATE` (new -- standing automation is the owner's to create; see "Roles" below). |
 | `patterns.py` | `policy.opteryx/app/models/policy.py` + `app/routes/v1/access.py` | What a pattern and a principal may look like, and how a pattern matches: `validate_pattern`, `validate_principal`, `resource_matches` (see "Patterns and principals" below). |
-| `models.py` | `authenticate.opteryx/app/policies.py` | `Grant` (role+pattern, the JWT-carried shape) and `Policy` (principal+role+pattern+metadata, the stored shape), plus `parse_policy_claim` for the `[role, pattern]` pairs a token carries. |
+| `models.py` | `authenticate.opteryx/app/policies.py` | `Grant` (role+pattern, the JWT-carried shape), `Policy` (principal+role+pattern+metadata, the stored shape) and `Entitlement` (actions+pattern, never stored), plus `parse_policy_claim` for the `[role, pattern]` pairs a token carries. |
 | `checks.py` | `opteryx-core`'s `can_perform_action`/`can_perform_workspace_action` + `policy.opteryx`'s `_check_pattern_access`/`_check_workspace_access` | The evaluation layer: data-plane checks over `Grant`s, administrative-plane checks over `Policy` documents. |
 | `grants.py` | `policy.opteryx/app/routes/v1/access.py`'s `create_policy`/`update_policy`/`delete_policy`/`create_genesis_policies` | The write half: `grant()`/`update_grant()`/`revoke()`/`revoke_grant()`/`bootstrap_workspace()`, enforcing every rule those routes did (self-grant prevention, pattern authority, conflict detection, principal and pattern validation) before calling a store. `revoke_grant` is the by-value form behind SQL `REVOKE` -- strictly 1:1 resolution by (principal, pattern, role), with level-mismatch diagnostics. Also the two reads that need a store: `grants_for_principal()` and `owned_by()`. |
+| `entitlements.py` | (new) | Scoped entitlements: `automation_admin::acme` resolves to `AUTOMATE` on `acme.*`. `ENTITLEMENT_KINDS` declares what each kind confers, the scope is in the name at issue, and none may confer `GRANT`/`REVOKE`. See "Entitlements" below. |
 | `store.py` | (new) | The `PolicyStore` protocol: the storage contract, and nothing else. No rules live here -- see "Layering" below. |
 | `audit.py` | `policy.opteryx/app/routes/v1/access.py`'s `_audit_policy_change` | One structured record per policy change, on the same field contract the existing log transforms already parse -- see "Audit records" below. |
 | `capability.py` | (new) | The permissions capability opteryx-core registers -- the one module that knows the engine exists. See "The opteryx-core capability" below. |
 | `adapters/firestore.py` | (new) | `FirestorePolicyStore`, matching the `{workspace}/$policies/access` layout policy.opteryx/control.opteryx already write to -- a drop-in for their inline Firestore calls. |
-| `exceptions.py` | (new) | Plain exceptions (`SelfAccessError`, `AccessDeniedError`, `PolicyConflictError`, ...) instead of `HTTPException` -- each caller translates to its own transport. |
+| `exceptions.py` | (new) | Plain exceptions (`SelfAccessError`, `AccessDeniedError`, `PolicyConflictError`, `InvalidActionError`, ...) instead of `HTTPException` -- each caller translates to its own transport. |
 
 ## Layering
 
@@ -130,10 +131,11 @@ Three roles, and the line between each pair is a sentence:
 ### Automation is owner-tier
 
 `AUTOMATE` gates creating, dropping, suspending, resuming, and re-pinning the
-identity of a **task** or **trigger**, and creating a **materialized view**
-(which lands a refresh trigger on every source it reads). It is the one
-action whose placement is not obvious from "does this change rows", so the
-reasoning is worth stating.
+identity of a **task** or **trigger**, and creating, suspending, resuming, or
+re-pinning the owner of a **materialized view** (creating one lands a refresh
+trigger on every source it reads, and its refreshes run as its owner). It is
+the one action whose placement is not obvious from "does this change rows",
+so the reasoning is worth stating.
 
 An `INSERT` is over when it finishes. A trigger is a standing commitment: it
 runs unattended, indefinitely, as a pinned identity, on the owner's compute,
@@ -153,7 +155,9 @@ A writer who wants derived data creates a plain view. Turning that into
 something that refreshes itself is precisely the moment an owner should be
 consulted, which is why `CREATE MATERIALIZED VIEW` is `AUTOMATE` rather than
 `CREATE`. `REFRESH` of an existing materialized view stays writer-tier: the
-decision to have it was taken, and authorized, when it was created.
+decision to have it was taken, and authorized, when it was created. `DROP
+MATERIALIZED VIEW` stays at `DROP`: it destroys the backing table's history,
+which is what `DROP` is for, and both are owner-tier.
 
 ### What the information schema shows to whom
 
@@ -183,27 +187,182 @@ Two things follow from this that are easy to get wrong:
   workspace. A table-level gate ("only owners may query `tasks`") has no
   sensible meaning for them; the row-level one does.
 
-### Not yet enforced in opteryx-core
+### What opteryx-core asks
 
-This library declares `AUTOMATE`; the engine does not yet ask about it. The
-binder today gates tasks, triggers, and materialized views at `WRITE`/`CREATE`,
-and `information_schema` and `SHOW CREATE` gate every row and every
-definition at `READ`. Landing the tiers above in opteryx-core means:
+The engine names the action; this library decides what it confers. The
+binder and `information_schema` ask about these tiers as follows (a
+capability must answer `AUTOMATE` like any other action -- a deployment
+upgrading this library and opteryx-core does so in step):
 
-- `CREATE`/`DROP`/`ALTER ... TRIGGER`, `CREATE`/`DROP` `TASK`, and `CREATE
-  MATERIALIZED VIEW` gate on `AUTOMATE` instead of `WRITE`/`CREATE`.
-- `DROP VIEW` gates on `WRITE`, matching `CREATE VIEW` and `ALTER VIEW`. A
-  view is text and is recreatable, which is the reason `DROP` is owner-only
-  for tables and not a reason here.
-- `information_schema.triggers` and `.tasks` filter rows on `AUTOMATE`;
-  `information_schema.views` nulls `view_definition` unless `WRITE` holds.
-- `SHOW CREATE VIEW`/`MATERIALIZED VIEW` gate on `WRITE`, `SHOW CREATE TASK`
-  on `AUTOMATE`.
+- `CREATE`/`DROP` `TASK`, `CREATE`/`DROP`/`ALTER ... TRIGGER` (suspend,
+  resume, owner transfer), `CREATE MATERIALIZED VIEW`, and `ALTER
+  MATERIALIZED VIEW` (suspend, resume, owner transfer) ask `AUTOMATE`.
+  `CREATE TASK ... ON <table>` asks it on the table too, since it lands a
+  trigger there.
+- `DROP VIEW` asks `WRITE`, matching `CREATE VIEW` and `ALTER VIEW`. A view
+  is text and is recreatable, which is the reason `DROP` is owner-only for
+  tables and not a reason here.
+- `information_schema.triggers` and `.tasks` show a row only where
+  `AUTOMATE` holds; `information_schema.views` shows the row at `READ` and
+  nulls `view_definition` unless `WRITE` holds.
+- `SHOW CREATE VIEW` and `SHOW CREATE MATERIALIZED VIEW` ask `WRITE`, `SHOW
+  CREATE TASK` asks `AUTOMATE`, `SHOW CREATE TABLE` asks `READ`.
 
-Until then, `SHOW GRANTS` advertises `AUTOMATE` on owner rows -- derived from
-`ACTION_ROLES`, as every action is -- ahead of the engine consulting it. That
-is the intended direction: the table is the source of truth, and the engine
-catches up to it, rather than the other way round.
+`SHOW GRANTS` advertises `AUTOMATE` on owner rows, derived from
+`ACTION_ROLES` as every action is, so what is advertised and what the engine
+asks for moved together.
+
+## Entitlements: operations, not data
+
+A role measures **depth** of access to rows: reader, then writer, then owner,
+each strictly containing the one before. That ordering is load-bearing --
+`role_outranks_or_equals` uses it and `find_conflict` decides redundancy with
+it -- and some authority does not lie on that line at all.
+
+**Running the operations of a workspace is not a deeper form of access to its
+data.** Someone who creates, suspends and re-pins its tasks need not read a
+row of it; an owner who can read everything is not thereby the right person to
+run its automation. So this is a different kind of object -- a set of actions
+on a pattern -- and not a fourth role. An `automator` holding `AUTOMATE` but
+not `WRITE` neither outranks `writer` nor is outranked by it; putting it in
+`ROLES` would mean scoring on the privilege ladder something with no place on
+it, and `find_conflict` would start giving wrong answers about redundancy.
+
+### The shape of a name
+
+The identity system already issues named entitlements to accounts --
+`platform_admin`, `data_admin`, `user_admin`. An entitlement this package
+recognizes is a **kind** and a **scope**, joined by `::`:
+
+```
+automation_admin::public
+automation_admin::platform
+automation_admin::acme
+automation_admin::acme.pipelines
+```
+
+The kind says what it confers; the scope says where, and covers everything
+beneath it. `automation_admin::acme` is `AUTOMATE` on `acme.*`: its holder can
+run every task and trigger in `acme` without being able to read a row of it.
+
+```python
+ENTITLEMENT_KINDS = {
+    "automation_admin": {"AUTOMATE"},
+}
+```
+
+**The scope is in the name, decided when the entitlement is issued.** The
+situation this exists for -- a workspace whose data belongs to a pipeline, run
+by bots, with no human owner, whose operations still need a human -- is not
+special to the platform's own namespaces. It is any customer whose workspace
+works that way, and the platform, not this package, is where "which
+workspace" is known. A table with `public.*` and `platform.*` hardcoded here
+would have answered the first two instances and needed a code change for
+every one after. This answers the general case; `public` and `platform` are
+its first two uses.
+
+The price is that the identity system carries a workspace name inside an
+entitlement string. Accepted: it is a runtime decision by the platform, and
+a runtime decision belongs in the system that makes them, not in a table
+that changes by pull request.
+
+### Names in, permissions out
+
+- **Assignment stays where it already is.** Nothing here creates, stores or
+  revokes an entitlement. There is already a system that assigns these and
+  audits doing so; a second mechanism would mean two places to look when
+  answering "why can this person do that".
+- **A token carries a name, never a permission.** A token can name a scope,
+  because that is the platform's to decide; it cannot name an action, because
+  that is not. A forged or stale token can claim `automation_admin::acme`; it
+  cannot claim `GRANT` on anything.
+- **Unrecognized kinds are ignored, not rejected.** A session holding
+  `user_admin` gets nothing here and no error -- that name is another
+  service's to interpret.
+- **A recognized kind with an unusable scope is skipped in a check and
+  rejected at issue.** `automation_admin` with no scope, or
+  `automation_admin::$internal`, confers nothing -- never something somewhere
+  by default. `resolve_entitlements` skips it, because a permission check is
+  not the place to fail a query over a misconfigured account;
+  `parse_entitlement_name` raises on it, so the path that mints entitlements
+  can refuse to.
+
+### Two namespaces with no administrator
+
+Why this exists at all. `public.*`: no policy can confer anything there
+(`validate_pattern` refuses a reserved workspace), the implicit grant caps
+everyone at `reader` before issued grants are consulted, and even the
+platform identities hold only `writer`. So `AUTOMATE` there had **no holder at
+all** -- the platform's own tasks and triggers could not be created,
+suspended, re-pinned or dropped by anybody, and
+`information_schema.tasks`/`.triggers`, which show a row only where
+`AUTOMATE` holds, showed nothing to anyone.
+
+`platform.*` is the same need from the opposite direction: an ordinary
+workspace where policies are perfectly legal, but which is run by bots, so no
+human holds owner. And a customer's `acme.*` is the same again.
+
+### Consulted before everything else
+
+| | Policy | Entitlement |
+|---|---|---|
+| Confers | a role | a set of actions |
+| Assigned by | `grant()`, into a `PolicyStore` | the identity system, as a name |
+| Reserved workspaces | refused | reached |
+| Carried in a token as | `policies` (role + pattern) | `entitlements` (names) |
+| Scope decided | in the stored policy | in the name, at issue |
+| Actions decided | by `ACTION_ROLES`, from the role | by `ENTITLEMENT_KINDS`, from the kind |
+
+Entitlements are evaluated ahead of both the implicit-grant cap and the issued
+grants. Above the cap, because `AUTOMATE` on `public.*` is otherwise reachable
+by nobody. Above issued grants, because a workspace run by bots has no human
+owner to grant it.
+
+**On an owned workspace this deliberately reaches past the owner.** That is
+the intent, not a leak: it is the platform saying who runs the operations of a
+namespace, a decision above any one workspace's owners, issued by the
+platform's identity system, which is the platform's to run. `ENTITLEMENT_KINDS`
+stays a short, code-declared table for the same reason -- a *kind* is a new
+sort of authority and should change by review; a *scope* is one more instance
+of an existing sort and need not.
+
+**It is additive, never subtractive.** `automation_admin::acme` does not make
+its holder a writer in `acme`; every other action there is still decided by
+that workspace's policies.
+
+**It can never confer policy administration.** `GRANT` and `REVOKE` are
+excluded from `ENTITLEABLE_ACTIONS`, checked when the kinds are declared (at
+import) and again in `entitlement_permits`. An entitlement is authority
+granted outside the ownership model; letting it confer authority *over* that
+model would let a non-owner mint ownership and make every other check here
+advisory. Engine-private (`$`) names are refused on the same basis, and
+`information_schema` cannot be a scope for the same reason it cannot be a
+pattern.
+
+### Where they show up
+
+`SHOW GRANTS` lists them first, matching the order `can_perform_action`
+decides in. The `role` column reads `entitlement` -- deliberately not one of
+`ROLES`, so the row cannot be mistaken for a role that was granted:
+
+```
+pattern           level      role         actions
+public.*          workspace  entitlement  AUTOMATE
+platform.*        workspace  entitlement  AUTOMATE
+personal.alice.*  workspace  owner        ALTER, AUTOMATE, CREATE, ...
+public.*          workspace  reader       READ
+```
+
+The engine passes the session's entitlement names to `grants()` as a third
+argument. It is optional, so an engine that does not pass them gets exactly
+the listing it got before entitlements existed -- but a deployment whose
+tokens carry names and whose `SHOW GRANTS` omits them reports less than it
+enforces.
+
+`SHOW USER` lists every entitlement an account holds, flat, with no signal
+which of them mean anything to data access. `entitlement_kinds()` returns the
+kinds this package acts on and `parse_entitlement_name()` says whether a
+given name is one of them, so that listing can mark the rows that do.
 
 ## Patterns and principals
 
@@ -240,6 +399,11 @@ Some access is held without a policy having been issued for it, declared once in
 | Any identity | `owner` on `personal.<identity>.*` | Your own namespace |
 | Everyone | `reader` on `public.*` | Shared open data, readable by all |
 | `PLATFORM_IDENTITIES` | `writer` on `public.*` | Something has to load and compact it |
+
+Note the shape: an identity-keyed exception to what a role could confer, which
+no policy can be written for. Entitlements generalize it to authority the
+identity system issues by name -- see "Entitlements: operations, not data"
+above -- and are consulted just ahead of the table below.
 
 These are checked **before** issued grants and **cap** what they cover: a
 resource in `public.` or in your own `personal.` is answered there and never
@@ -540,17 +704,21 @@ Suggested order, each independently shippable:
    The adapter this needs is `opteryx_access.capability` -- **done**; see
    "The opteryx-core capability" below.
 
-   Still open on the engine side: adopting `AUTOMATE` and the
-   information-schema tiers -- see "Not yet enforced in opteryx-core" under
-   "Roles" above for the exact list of gates.
+   The engine asks `AUTOMATE` for automation statements and gates
+   `information_schema` and `SHOW CREATE` per tier -- see "What opteryx-core
+   asks" under "Roles" above for the exact list.
 
    Both packages support Python 3.11+, so a deployment can run them together
    on any version opteryx-core supports.
 2. **odata.opteryx**: replace `app/auth/permissions.py`'s
    `role_allows_read`/`read_grant_for_relation`/pattern matching with
    `opteryx_access.checks.can_perform_action` (action="READ"). Leaves
-   `entitlements_from_claims`/`billing_account_from_claims` alone -- those
-   are a different concern (entitlements/billing), not permissions.
+   `billing_account_from_claims` alone -- billing is a different concern.
+   `entitlements_from_claims` mostly stays where it is too, but it is no
+   longer wholly unrelated: pass the names it returns to `can_perform_action`
+   as `entitlements=`, so a name that confers data authority is honoured
+   there. Names this package does not recognize resolve to nothing, so
+   passing all of them is safe.
 3. **policy.opteryx** and **control.opteryx**: thin `app/routes/v1/access.py`
    down to request parsing, calling `opteryx_access.grants.grant`/
    `update_grant`/`revoke`/`bootstrap_workspace` via `FirestorePolicyStore`,

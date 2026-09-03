@@ -36,7 +36,17 @@ def test_writer_tier_is_exactly_the_artefact_actions():
     # shape, its existence, its layout, who may read it, what it does on its
     # own -- is the owner's.
     writer_actions = {action for action in ACTION_ROLES if "writer" in ACTION_ROLES[action]}
-    assert writer_actions == {"READ", "WRITE", "UPDATE", "DELETE", "CREATE", "REFRESH"}
+    assert writer_actions == {"READ", "WRITE", "UPDATE", "DELETE", "CREATE", "REFRESH", "SIGNAL"}
+
+
+def test_signalling_is_writer_tier_and_not_automation():
+    # A signal fires work that was authorized when its trigger was armed; the
+    # caller is recorded as the event and the run carries the trigger's own
+    # identity. A writer may kick it off; only an owner may decide the
+    # automation exists (AUTOMATE), and a reader may do neither.
+    assert allowed_roles("SIGNAL") == {"writer", "owner"}
+    assert not action_allowed_for_role("reader", "SIGNAL")
+    assert allowed_roles("SIGNAL") != allowed_roles("AUTOMATE")
 
 
 def test_reader_may_only_read():
