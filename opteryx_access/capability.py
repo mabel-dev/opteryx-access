@@ -301,6 +301,33 @@ class PermissionsCapability:
             raise AccessDeniedError("an anonymous session cannot administer grants")
         return normalize(identity)
 
+    @staticmethod
+    def _refuse_platform_identity(principal: str, doing: str) -> None:
+        """Platform identities are not grantable through the SQL surface.
+
+        Their access is the platform's own arrangement, held two ways that an
+        ordinary GRANT is not: hardcoded in `implicit_grants` for `public.*`,
+        and - for a workspace's compaction - through
+        `ALTER WORKSPACE ... SET maintenance`, which writes the policy itself.
+
+        Refused rather than filtered, and refused in BOTH directions. A GRANT
+        here would mint standing platform-wide authority that no setting
+        reflects and no screen shows, since the access list does not render
+        these identities. A REVOKE would turn maintenance off by a route that
+        leaves the setting reading ON - the one way the two could disagree,
+        and the reason `set_workspace_maintenance` can be the only writer.
+
+        Both are named in the message, because somebody reaching for GRANT
+        here wants one of them and neither is obvious from a refusal.
+        """
+        if normalize(principal) in PLATFORM_IDENTITIES:
+            raise AccessDeniedError(
+                f"{principal} is a platform identity and cannot be {doing} directly. "
+                "Its access is the platform's own: compaction of a workspace is turned "
+                "on and off with `ALTER WORKSPACE <workspace> SET maintenance TO ON|OFF`, "
+                "and its read access to `public` is intrinsic and not a policy."
+            )
+
     def apply_grant(self, execution_context, pattern: str, role: str, principal: str) -> str:
         """Add ONE policy: `role` on `pattern` to `principal`. Returns its id.
 
@@ -313,6 +340,7 @@ class PermissionsCapability:
         There is no upgrade path: changing an existing grant is REVOKE then
         GRANT, by the caller.
         """
+        self._refuse_platform_identity(principal, "granted access")
         store = self._administration_store(f"grant {role!r} on {pattern!r}")
         actor = self._acting_identity(execution_context)
         pattern = validate_pattern(pattern)
@@ -335,6 +363,7 @@ class PermissionsCapability:
         reported (naming that policy and its level), never narrowed or
         silently left in place. Returns the revoked policy's id.
         """
+        self._refuse_platform_identity(principal, "revoked from")
         store = self._administration_store(f"revoke {role!r} on {pattern!r}")
         actor = self._acting_identity(execution_context)
         pattern = validate_pattern(pattern)

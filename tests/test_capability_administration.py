@@ -578,8 +578,11 @@ def test_turning_it_off_leaves_the_identitys_other_grants_alone():
     arrangement. Maintenance owns exactly one policy and must not delete a
     second one on its way out."""
     store = _store()
+    # Seeded directly: the SQL surface refuses a grant naming a platform
+    # identity, so a policy like this is one the platform put there - which is
+    # exactly the kind maintenance must not delete on its way out.
+    store.seed("analytics", Policy(principal="federator", role="writer", pattern="analytics.ops.*"))
     cap = capability(store)
-    cap.apply_grant(_alice(), "analytics.ops.*", "writer", "federator")
     cap.set_workspace_maintenance(_alice(), "analytics", True)
 
     cap.set_workspace_maintenance(_alice(), "analytics", False)
@@ -592,8 +595,8 @@ def test_a_collection_grant_does_not_read_as_maintenance_being_on():
     the setting must still read as off and turning it on must write the real
     policy rather than deciding there is nothing to do."""
     store = _store()
+    store.seed("analytics", Policy(principal="federator", role="writer", pattern="analytics.ops.*"))
     cap = capability(store)
-    cap.apply_grant(_alice(), "analytics.ops.*", "writer", "federator")
 
     assert cap.workspace_maintenance(_alice(), "analytics") is False
 
@@ -602,3 +605,57 @@ def test_a_collection_grant_does_not_read_as_maintenance_being_on():
         "analytics.*",
         "analytics.ops.*",
     ]
+
+
+# --- platform identities are not grantable through the SQL surface
+
+
+def test_granting_a_platform_identity_is_refused():
+    """A GRANT here would mint standing platform-wide authority that no setting
+    reflects and no screen shows - the access list does not render these
+    identities at all."""
+    store = _store()
+    with pytest.raises(AccessDeniedError, match="maintenance"):
+        capability(store).apply_grant(_alice(), "analytics.*", "writer", "federator")
+
+
+def test_revoking_a_platform_identity_is_refused():
+    """The direction that matters more: a REVOKE would turn maintenance off by
+    a route that leaves the setting reading ON. Refusing it is what lets
+    set_workspace_maintenance be the only writer, and so the only thing the
+    setting can disagree with (nothing)."""
+    store = _store()
+    capability(store).set_workspace_maintenance(_alice(), "analytics", True)
+
+    with pytest.raises(AccessDeniedError, match="maintenance"):
+        capability(store).apply_revoke(_alice(), "analytics.*", "writer", "federator")
+
+    assert len(_maintenance_policies(store)) == 1
+
+
+def test_the_refusal_names_both_routes_a_caller_might_want():
+    """Somebody reaching for GRANT here wants either maintenance or public
+    read, and neither is obvious from a bare refusal."""
+    store = _store()
+    with pytest.raises(AccessDeniedError) as refusal:
+        capability(store).apply_grant(_alice(), "analytics.*", "writer", "xb500")
+
+    message = str(refusal.value)
+    assert "ALTER WORKSPACE" in message
+    assert "public" in message
+
+
+def test_an_ordinary_principal_is_unaffected():
+    store = _store()
+    policy_id = capability(store).apply_grant(_alice(), "analytics.*", "writer", "bob")
+
+    assert store.get_policy("analytics", policy_id).principal == "bob"
+
+
+def test_maintenance_still_writes_the_policy_the_sql_surface_refuses():
+    """The refusal is on the SQL surface, not in `grant()`. If it sat lower
+    this setting could not write its own policy either."""
+    store = _store()
+    capability(store).set_workspace_maintenance(_alice(), "analytics", True)
+
+    assert [p.principal for p in _maintenance_policies(store)] == ["federator"]
