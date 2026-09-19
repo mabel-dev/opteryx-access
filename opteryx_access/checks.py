@@ -32,6 +32,8 @@ for the reason spelled out in `can_perform_action`.
 
 from collections.abc import Iterable
 
+import os
+
 from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.entitlements import entitlement_permits
 from opteryx_access.entitlements import entitlement_permits_workspace_action
@@ -63,6 +65,36 @@ from opteryx_access.patterns import resource_matches
 # -- an identity arrives already authenticated -- so these names have to be
 # unregisterable wherever accounts are created.
 PLATFORM_IDENTITIES: frozenset[str] = frozenset({"federator", "xb500"})
+
+
+# The one platform identity the compactor submits as, and so the one a
+# workspace's `maintenance` setting grants WRITE to.
+#
+# ONE NAME FOR ONE THING, and the name is `COMPACTION_IDENTITY` because two
+# other services already read that variable for the same identity: xb500's
+# `trigger_compaction`, which submits the `OPTIMIZE`, and jobs.opteryx's
+# `maintenance_billing.platform_identity`, which decides both what is
+# house-billed and who may claim trigger provenance. Three readers, one
+# variable: pointing the platform at a new identity moves all of them or none.
+# Splitting them is the documented failure mode - a gate matching an identity
+# nothing submits as, which fails quietly.
+#
+# Defaulted rather than required, because an unset value here must not stop a
+# workspace answering "is maintenance on"; the default is the identity in use.
+MAINTENANCE_IDENTITY_ENV = "COMPACTION_IDENTITY"
+MAINTENANCE_IDENTITY_DEFAULT = "federator"
+
+
+def maintenance_identity() -> str:
+    """The identity a workspace's `maintenance` setting grants WRITE to.
+
+    Read per call rather than bound at import: the retirement of `federator`
+    moves this, and a module-level constant would be frozen for the life of
+    the process and need a redeploy to notice.
+    """
+    return normalize(
+        os.environ.get(MAINTENANCE_IDENTITY_ENV, "").strip() or MAINTENANCE_IDENTITY_DEFAULT
+    )
 
 
 def implicit_grants(identity: str | None) -> list[Grant]:

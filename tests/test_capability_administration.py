@@ -479,3 +479,126 @@ def test_effective_grants_in_agrees_with_what_can_perform_action_decides():
             "READ",
             identity=row["user"],
         ), row
+
+
+# --- maintenance: the setting that is a grant
+
+
+def _maintenance_policies(store, workspace="analytics", principal="federator"):
+    return [p for p in store.list_policies_for_principal(workspace, principal)]
+
+
+def test_maintenance_on_grants_the_identity_writer_on_the_workspace():
+    """The setting IS the policy. Workspace-wide, because that is the level it
+    is offered at - a dataset inside shows it inherited and cannot manage it."""
+    store = _store()
+    capability(store).set_workspace_maintenance(_alice(), "analytics", True)
+
+    policies = _maintenance_policies(store)
+    assert [(p.principal, p.role, p.pattern) for p in policies] == [
+        ("federator", "writer", "analytics.*")
+    ]
+
+
+def test_maintenance_off_revokes_it():
+    store = _store()
+    cap = capability(store)
+    cap.set_workspace_maintenance(_alice(), "analytics", True)
+    cap.set_workspace_maintenance(_alice(), "analytics", False)
+
+    assert _maintenance_policies(store) == []
+
+
+def test_turning_it_on_twice_is_a_no_op_not_a_conflict():
+    """`grant()` refuses a policy that already exists, correctly for a caller
+    asking for a change. A setting set to what it already says is not a change
+    and not an error."""
+    store = _store()
+    cap = capability(store)
+    cap.set_workspace_maintenance(_alice(), "analytics", True)
+    cap.set_workspace_maintenance(_alice(), "analytics", True)
+
+    assert len(_maintenance_policies(store)) == 1
+
+
+def test_turning_it_off_when_it_is_already_off_is_a_no_op():
+    store = _store()
+    capability(store).set_workspace_maintenance(_alice(), "analytics", False)
+
+    assert _maintenance_policies(store) == []
+
+
+def test_reading_it_back_comes_from_the_policy():
+    """Derived, never a stored flag: what this reports is what the compactor's
+    own permission check will decide."""
+    store = _store()
+    cap = capability(store)
+    assert cap.workspace_maintenance(_alice(), "analytics") is False
+
+    cap.set_workspace_maintenance(_alice(), "analytics", True)
+    assert cap.workspace_maintenance(_alice(), "analytics") is True
+
+    cap.set_workspace_maintenance(_alice(), "analytics", False)
+    assert cap.workspace_maintenance(_alice(), "analytics") is False
+
+
+def test_maintenance_needs_owner_authority_over_the_workspace():
+    """The same refusal the GRANT spelled out longhand would get. Phrasing it
+    as a setting does not weaken it: what it turns on is a standing WRITE grant
+    over everything in the workspace."""
+    store = _store()
+    stranger = FakeExecutionContext(user="mallory")
+
+    with pytest.raises(AccessDeniedError):
+        capability(store).set_workspace_maintenance(stranger, "analytics", True)
+
+    assert _maintenance_policies(store) == []
+
+
+def test_maintenance_requires_a_store():
+    with pytest.raises(PolicyStoreRequiredError):
+        capability().set_workspace_maintenance(_alice(), "analytics", True)
+
+
+def test_reading_maintenance_without_a_store_is_off_not_an_error():
+    """A read has no policy store to consult, so it reports the only thing it
+    can stand behind. A raise here would make "is my data maintained" fail
+    closed and noisily on a deployment that simply has no policies."""
+    assert capability().workspace_maintenance(_alice(), "analytics") is False
+
+
+def test_an_anonymous_session_cannot_change_it():
+    store = _store()
+    with pytest.raises(AccessDeniedError):
+        capability(store).set_workspace_maintenance(FakeExecutionContext(), "analytics", True)
+
+
+def test_turning_it_off_leaves_the_identitys_other_grants_alone():
+    """A `writer` grant the identity holds at another level is somebody else's
+    arrangement. Maintenance owns exactly one policy and must not delete a
+    second one on its way out."""
+    store = _store()
+    cap = capability(store)
+    cap.apply_grant(_alice(), "analytics.ops.*", "writer", "federator")
+    cap.set_workspace_maintenance(_alice(), "analytics", True)
+
+    cap.set_workspace_maintenance(_alice(), "analytics", False)
+
+    assert [p.pattern for p in _maintenance_policies(store)] == ["analytics.ops.*"]
+
+
+def test_a_collection_grant_does_not_read_as_maintenance_being_on():
+    """The mirror of the test above: a narrower grant is not this setting, so
+    the setting must still read as off and turning it on must write the real
+    policy rather than deciding there is nothing to do."""
+    store = _store()
+    cap = capability(store)
+    cap.apply_grant(_alice(), "analytics.ops.*", "writer", "federator")
+
+    assert cap.workspace_maintenance(_alice(), "analytics") is False
+
+    cap.set_workspace_maintenance(_alice(), "analytics", True)
+    assert sorted(p.pattern for p in _maintenance_policies(store)) == [
+        "analytics.*",
+        "analytics.ops.*",
+    ]

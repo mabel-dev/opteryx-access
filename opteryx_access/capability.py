@@ -36,6 +36,7 @@ and what it changes come from one evaluation.
 
 from opteryx_access.actions import ACTION_ROLES
 from opteryx_access.checks import PLATFORM_IDENTITIES
+from opteryx_access.checks import maintenance_identity
 from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
@@ -346,6 +347,120 @@ class PermissionsCapability:
             role=role,
             pattern=pattern,
         )
+
+    # -- maintenance ---------------------------------------------------
+    #
+    # `ALTER WORKSPACE <ws> SET maintenance TO ON|OFF` is a setting in the
+    # statement and a GRANT in the store: what it names is whether the
+    # platform's compactor may WRITE here, and that is a policy like any other.
+    #
+    # It exists because the alternative is what the platform did before it:
+    # to have a workspace compacted, its owner added an identity they had
+    # never heard of to their access list at `writer`, with nothing on that
+    # screen saying what it was for or that revoking it turned maintenance off.
+    # The mechanism was sound and the surface was backwards. Nothing about the
+    # authority changes here - the same policy, checked by the same rules,
+    # written by the same `grant()` - only who has to know it is a policy.
+    #
+    # One piece of state, deliberately: the setting IS the grant's existence,
+    # never a flag stored beside it. A flag could disagree with the policy that
+    # actually decides, and the disagreement would be invisible until a
+    # compaction that everyone believed was running turned out not to be.
+
+    MAINTENANCE_ROLE = "writer"
+
+    @staticmethod
+    def _maintenance_pattern(workspace: str) -> str:
+        """The pattern maintenance is held at: the whole workspace.
+
+        Workspace-wide and not narrower, because that is the level the setting
+        is offered at. A dataset inside an enabled workspace shows the setting
+        as INHERITED and cannot manage it - exactly as it shows an inherited
+        grant, which is what it is.
+        """
+        return f"{normalize(workspace)}.*"
+
+    def set_workspace_maintenance(self, execution_context, workspace: str, enabled: bool) -> None:
+        """Turn platform maintenance on or off for `workspace`.
+
+        Idempotent in both directions. `grant()` refuses a policy that already
+        exists and `revoke_grant()` refuses one that does not, both correctly
+        for a caller who asked for a change - but a SETTING set to what it
+        already says is not an error, it is a no-op. So the current state is
+        read first and a call that would change nothing writes nothing.
+
+        Everything else is `apply_grant`/`apply_revoke`: the same store, the
+        same actor, the same owner-authority check, the same audit record. A
+        caller who lacks owner authority over the workspace is refused here
+        exactly as they would be for the GRANT spelled out longhand.
+        """
+        store = self._administration_store(
+            f"{'enable' if enabled else 'disable'} maintenance on {workspace!r}"
+        )
+        actor = self._acting_identity(execution_context)
+        principal = maintenance_identity()
+        workspace = normalize(workspace)
+        pattern = validate_pattern(self._maintenance_pattern(workspace))
+
+        if self._maintenance_policy(store, workspace, principal, pattern) is not None:
+            if enabled:
+                return
+            revoke_grant(
+                store,
+                actor=actor,
+                workspace=workspace,
+                principal=principal,
+                role=self.MAINTENANCE_ROLE,
+                pattern=pattern,
+            )
+            return
+
+        if not enabled:
+            return
+
+        grant(
+            store,
+            actor=actor,
+            workspace=workspace,
+            principal=principal,
+            role=self.MAINTENANCE_ROLE,
+            pattern=pattern,
+        )
+
+    def workspace_maintenance(self, execution_context, workspace: str) -> bool:
+        """Whether platform maintenance is on for `workspace`.
+
+        Derived from the policy, never from a stored flag, so what this
+        reports is what the compactor's own permission check will decide.
+
+        Deliberately NOT gated on owner authority the way the grant listings
+        are: this answers "is my data being maintained", which is a property of
+        the workspace rather than a fact about who holds access to it, and it
+        names no principal. The listings stay owner-only.
+        """
+        store = self._store
+        if store is None:
+            return False
+        workspace = normalize(workspace)
+        principal = maintenance_identity()
+        pattern = self._maintenance_pattern(workspace)
+        return self._maintenance_policy(store, workspace, principal, pattern) is not None
+
+    def _maintenance_policy(self, store, workspace: str, principal: str, pattern: str):
+        """The stored policy that IS the maintenance setting, or None.
+
+        Matched on all three of principal, pattern and role. A `writer` grant
+        the identity holds at some other level is somebody else's arrangement
+        and not this setting - turning maintenance off must not delete it, and
+        turning it on must not be fooled into writing nothing by it.
+        """
+        for policy in store.list_policies_for_principal(workspace, principal):
+            if (
+                normalize(policy.pattern) == normalize(pattern)
+                and policy.role == self.MAINTENANCE_ROLE
+            ):
+                return policy
+        return None
 
     def _policy_rows(
         self, execution_context, pattern: str, doing: str, covering: bool
