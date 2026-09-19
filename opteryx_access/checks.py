@@ -81,6 +81,17 @@ def implicit_grants(identity: str | None) -> list[Grant]:
     An anonymous session (no identity) holds no personal namespace: there is
     no `personal.<nobody>` for it to own.
 
+    The personal namespace takes TWO patterns, because `fnmatch` does not
+    treat `personal.alice.*` as covering `personal.alice` -- the trailing
+    `.` is a literal that the bare collection name has nothing to match.
+    Without the exact-name pattern an identity owns every dataset in their
+    personal collection while holding nothing on the collection itself, and
+    the engine's collection-level statements (CREATE COLLECTION, DROP
+    COLLECTION, LOAD SAMPLE) all check the two-part name. Ordinary
+    workspaces never hit this: an owner's `ws.*` does match `ws.collection`.
+    The two patterns are disjoint -- no resource matches both -- so unlike
+    the `public.*` pair below their order is not load-bearing.
+
     A platform identity (see `PLATFORM_IDENTITIES`) holds `writer` on
     `public.*` rather than `reader`. Writer, not owner: these identities load
     and compact what is in `public`, and neither dropping a public dataset nor
@@ -89,6 +100,7 @@ def implicit_grants(identity: str | None) -> list[Grant]:
     grants = []
     if identity:
         normalized = normalize(identity)
+        grants.append(Grant(role="owner", pattern=f"personal.{escape_glob(normalized)}"))
         grants.append(Grant(role="owner", pattern=f"personal.{escape_glob(normalized)}.*"))
         if normalized in PLATFORM_IDENTITIES:
             # ORDER IS LOAD-BEARING: `can_perform_action` answers from the first

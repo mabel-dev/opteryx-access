@@ -237,6 +237,7 @@ def test_without_a_store_the_check_raises_rather_than_denying():
 def test_grants_lists_implicit_first_then_issued():
     rows = capability().grants("alice", [{"pattern": "analytics.*", "role": "writer"}])
     assert [(r["pattern"], r["role"]) for r in rows] == [
+        ("personal.alice", "owner"),
         ("personal.alice.*", "owner"),
         ("public.*", "reader"),
         ("analytics.*", "writer"),
@@ -301,6 +302,9 @@ def test_reported_grants_agree_with_what_is_enforced():
         user="olive", access_policies=[{"pattern": "ws.*", "role": "writer"}]
     )
     probes = {
+        # The personal namespace is reported as two rows because it is
+        # enforced as two patterns: the collection itself, and what is in it.
+        "personal.olive": "personal.olive",
         "personal.olive.*": "personal.olive.tbl",
         "public.*": "public.coll.tbl",
         "ws.*": "ws.coll.tbl",
@@ -315,7 +319,12 @@ def test_reported_grants_agree_with_what_is_enforced():
 
 def test_grants_skips_malformed_policies():
     rows = capability().grants("alice", [None, {"pattern": "ws.*", "role": "writer"}])
-    assert [r["pattern"] for r in rows] == ["personal.alice.*", "public.*", "ws.*"]
+    assert [r["pattern"] for r in rows] == [
+        "personal.alice",
+        "personal.alice.*",
+        "public.*",
+        "ws.*",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +550,7 @@ def test_show_grants_reports_entitlements_first():
     # row for one that was granted.
     assert rows[0]["role"] not in ROLES
     # The implicit and issued grants still follow, unchanged.
-    assert [row["role"] for row in rows[2:]] == ["owner", "reader"]
+    assert [row["role"] for row in rows[2:]] == ["owner", "owner", "reader"]
 
 
 def test_show_grants_without_the_names_is_unchanged():

@@ -396,6 +396,7 @@ Some access is held without a policy having been issued for it, declared once in
 
 | Who | Holds | Why |
 |---|---|---|
+| Any identity | `owner` on `personal.<identity>` | Your own collection itself -- `personal.<identity>.*` does not fnmatch the bare two-part name, and `CREATE COLLECTION` / `DROP COLLECTION` / `LOAD SAMPLE` all check it |
 | Any identity | `owner` on `personal.<identity>.*` | Your own namespace |
 | Everyone | `reader` on `public.*` | Shared open data, readable by all |
 | `PLATFORM_IDENTITIES` | `writer` on `public.*` | Something has to load and compact it |

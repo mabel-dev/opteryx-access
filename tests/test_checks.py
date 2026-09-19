@@ -31,6 +31,59 @@ def test_implicit_personal_namespace_owner():
     assert not can_perform_action([], "personal.bob.private", "DROP", identity="alice")
 
 
+def test_implicit_personal_namespace_covers_the_collection_itself():
+    # `personal.alice.*` does not fnmatch `personal.alice` -- the trailing `.`
+    # is a literal the bare collection name has nothing to match. The engine's
+    # collection-level statements (CREATE COLLECTION, DROP COLLECTION, LOAD
+    # SAMPLE) all check that two-part name, so without the exact-name pattern
+    # an identity owns every dataset in their personal collection while being
+    # refused the collection.
+    grants = implicit_grants("alice")
+    assert Grant(role="owner", pattern="personal.alice") in grants
+
+    assert can_perform_action([], "personal.alice", "CREATE", identity="alice")
+    assert can_perform_action([], "personal.alice", "DROP", identity="alice")
+    assert can_perform_action([], "personal.alice", "READ", identity="alice")
+
+
+def test_personal_collection_of_another_identity_is_refused():
+    assert not can_perform_action([], "personal.bob", "CREATE", identity="alice")
+    assert not can_perform_action([], "personal.bob", "READ", identity="alice")
+
+
+def test_personal_collection_exact_name_does_not_match_a_prefix_neighbour():
+    # The same trap the `.*` pattern has: `personal.alice2` must not be read as
+    # covered by alice's exact-name grant.
+    assert not can_perform_action([], "personal.alice2", "READ", identity="alice")
+
+
+def test_anonymous_holds_no_personal_collection():
+    assert not can_perform_action([], "personal.alice", "READ", identity=None)
+
+
+def test_personal_collection_grant_does_not_reach_the_personal_workspace():
+    # Stripped of a trailing `.*` the exact-name pattern reduces to itself, so
+    # it cannot clear a whole-workspace check on `personal` -- which would hand
+    # every identity authority over everyone else's namespace.
+    grants = implicit_grants("alice")
+    assert not can_perform_workspace_action(grants, "personal", "ALTER")
+    assert not can_perform_workspace_action(grants, "personal", "DROP")
+
+
+def test_personal_collection_pattern_is_glob_escaped():
+    # As with the `.*` pattern, metacharacters in an identity must not widen
+    # the collection the caller owns.
+    assert not can_perform_action([], "personal.alice", "READ", identity="*")
+    assert not can_perform_action([], "personal.alice", "READ", identity="?????")
+    assert not can_perform_action([], "personal.alice", "READ", identity="[a-z]*")
+
+
+def test_engine_private_personal_collection_is_still_refused():
+    # The `$` deny runs before implicit grants, and the new exact-name pattern
+    # is decided in that same pass.
+    assert not can_perform_action([], "personal.$system", "READ", identity="$system")
+
+
 def test_implicit_public_is_read_only_regardless_of_issued_policy():
     # public.* is capped read-only by the implicit grant even if an issued
     # policy claims otherwise -- implicit grants short-circuit and never fall
