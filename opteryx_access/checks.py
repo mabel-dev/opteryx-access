@@ -125,9 +125,22 @@ def implicit_grants(identity: str | None) -> list[Grant]:
     the `public.*` pair below their order is not load-bearing.
 
     A platform identity (see `PLATFORM_IDENTITIES`) holds `writer` on
-    `public.*` rather than `reader`. Writer, not owner: these identities load
-    and compact what is in `public`, and neither dropping a public dataset nor
-    granting anyone access to one is theirs to do.
+    `public.*` and `samples.*` rather than `reader`. Writer, not owner: these
+    identities load and compact what is in them, and neither dropping one of
+    those datasets nor granting anyone access to one is theirs to do.
+
+    `samples.*` is UNIVERSALLY READABLE and read-only, exactly as `public.*`
+    is, so anyone can query a sample or fork one with `CREATE TABLE ... CLONE`
+    without a policy being issued to them.
+
+    It is NOT LISTED, and that follows from being here rather than from a
+    second rule somewhere: implicit grants never appear in a token's `policies`
+    claim, and odata.opteryx builds its service document -- which is what draws
+    Studio's catalog tree -- from that claim. `public` is in the tree only
+    because the service document unions it in by name. `samples` deliberately
+    is not: five scale factors of TPC-H would be forty datasets in the catalog
+    of every account on the platform, forever, to be forked once. Someone who
+    wants to look before forking can still `SELECT` from it.
     """
     grants = []
     if identity:
@@ -140,7 +153,9 @@ def implicit_grants(identity: str | None) -> list[Grant]:
             # this has to precede the reader grant below or it would never be
             # reached.
             grants.append(Grant(role="writer", pattern="public.*"))
+            grants.append(Grant(role="writer", pattern="samples.*"))
     grants.append(Grant(role="reader", pattern="public.*"))
+    grants.append(Grant(role="reader", pattern="samples.*"))
     return grants
 
 

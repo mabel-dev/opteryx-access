@@ -240,13 +240,19 @@ def test_grants_lists_implicit_first_then_issued():
         ("personal.alice", "owner"),
         ("personal.alice.*", "owner"),
         ("public.*", "reader"),
+        ("samples.*", "reader"),
         ("analytics.*", "writer"),
     ]
 
 
 def test_grants_for_an_anonymous_session_has_no_personal_namespace():
     rows = capability().grants("", [])
-    assert [(r["pattern"], r["role"]) for r in rows] == [("public.*", "reader")]
+    # Both universally-readable namespaces, and nothing else: an anonymous
+    # session owns no personal namespace and holds no issued policy.
+    assert [(r["pattern"], r["role"]) for r in rows] == [
+        ("public.*", "reader"),
+        ("samples.*", "reader"),
+    ]
 
 
 def test_grants_actions_are_derived_from_the_enforced_table():
@@ -307,6 +313,7 @@ def test_reported_grants_agree_with_what_is_enforced():
         "personal.olive": "personal.olive",
         "personal.olive.*": "personal.olive.tbl",
         "public.*": "public.coll.tbl",
+        "samples.*": "samples.tpch_sf1.lineitem",
         "ws.*": "ws.coll.tbl",
     }
     for row in cap.grants(context.user, context.access_policies):
@@ -323,6 +330,7 @@ def test_grants_skips_malformed_policies():
         "personal.alice",
         "personal.alice.*",
         "public.*",
+        "samples.*",
         "ws.*",
     ]
 
@@ -550,7 +558,7 @@ def test_show_grants_reports_entitlements_first():
     # row for one that was granted.
     assert rows[0]["role"] not in ROLES
     # The implicit and issued grants still follow, unchanged.
-    assert [row["role"] for row in rows[2:]] == ["owner", "owner", "reader"]
+    assert [row["role"] for row in rows[2:]] == ["owner", "owner", "reader", "reader"]
 
 
 def test_show_grants_without_the_names_is_unchanged():

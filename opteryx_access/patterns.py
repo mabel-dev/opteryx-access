@@ -40,8 +40,9 @@ _GLOB_CHARACTERS = "*?["
 # Workspaces that are never grantable through a policy -- access to them is
 # decided by a mechanism other than the access-policy documents this package
 # manages (a hardcoded anonymous allowlist for "public", owner-only hardcoding
-# for "personal" -- see odata.opteryx).
-RESERVED_WORKSPACES: tuple[str, ...] = ("public", "personal")
+# for "personal" -- see odata.opteryx; an implicit reader grant for "samples"
+# -- see `implicit_grants`).
+RESERVED_WORKSPACES: tuple[str, ...] = ("public", "personal", "samples")
 
 # Synthetic per-workspace collection generated on the fly for whoever already
 # has access to that workspace. It has no real catalog entry of its own, so it
