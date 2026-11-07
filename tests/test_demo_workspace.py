@@ -74,11 +74,12 @@ def test_any_signed_in_identity_reads_public_samples_and_demo(resource):
         "public.geopolitics",
     ],
 )
-def test_transitional_anonymous_collections_stay_readable(resource):
-    # Until every anonymous consumer reads `demo`. Delete this test with
-    # `_TRANSITIONAL_ANONYMOUS_PATTERNS`.
-    assert _can(resource, "READ", None)
-    assert not _can(resource, "WRITE", None)
+def test_the_collections_anonymous_sessions_used_to_read_are_closed(resource):
+    # odata let these two `public` collections through anonymously before
+    # `demo` existed, and 0.2.16-0.2.17 kept them open while the consumers
+    # moved. Every one reads `demo` now; signing in is what reads `public`.
+    assert not _can(resource, "READ", None)
+    assert _can(resource, "READ", "alice")
 
 
 # --------------------------------------------------------------------------
@@ -159,7 +160,6 @@ def test_the_demo_grant_is_implicit_not_issued():
         (DEMO, "alice", "reader", GLOBAL_UNAUTHENTICATED_READ_POLICY),
         ("public.astronomy.planets", "alice", "reader", AUTHENTICATED_READ_POLICY),
         ("samples.tpch_sf1.lineitem", "alice", "reader", AUTHENTICATED_READ_POLICY),
-        ("public.security.cisa_kev", None, "reader", GLOBAL_UNAUTHENTICATED_READ_POLICY),
         ("personal.alice.notes", "alice", "owner", PERSONAL_POLICY),
         ("public.astronomy.planets", "xb500", "writer", PLATFORM_MAINTENANCE_POLICY),
         (DEMO, "xb500", "owner", PLATFORM_MAINTENANCE_POLICY),
@@ -176,6 +176,7 @@ def test_implicit_access_reports_the_rule_that_applied(resource, identity, role,
     [
         ("analytics.sales.q1", "alice"),
         ("public.astronomy.planets", None),
+        ("public.security.cisa_kev", None),
         ("personal.bob.notes", "alice"),
         ("demo.$private.thing", "alice"),
         ("local_table", "alice"),
@@ -197,9 +198,9 @@ def test_implicit_access_agrees_with_enforcement():
 
 
 def test_implicitly_readable_workspaces():
-    # A starting point for listing, not a decision: `public` is here for an
-    # anonymous caller only because of the transitional collections.
-    assert implicitly_readable_workspaces(None) == {"demo", "public"}
+    # A starting point for listing, not a decision. An anonymous caller starts,
+    # and ends, at `demo`.
+    assert implicitly_readable_workspaces(None) == {"demo"}
     assert implicitly_readable_workspaces("alice") == {"personal", "public", "samples", "demo"}
 
 

@@ -97,10 +97,10 @@ def maintenance_identity() -> str:
     )
 
 
-# The workspace an anonymous session can read -- the ONLY one, once the
-# transitional grants below are gone. It holds what the public demo site, the
-# docs' "try it" panels and the notebooks read without a token, so that nothing
-# a newcomer sees in `public` has to double as the open internet's surface.
+# The ONLY workspace an anonymous session can read. It holds what the public
+# demo site, the docs' "try it" panels and the notebooks read without a token,
+# so that nothing a newcomer sees in `public` has to double as the open
+# internet's surface.
 UNAUTHENTICATED_WORKSPACE = "demo"
 
 # The one identity that OWNS `demo` rather than merely writing it. The demo's
@@ -113,24 +113,6 @@ UNAUTHENTICATED_WORKSPACE = "demo"
 # confers no policy administration in practice: `validate_pattern` refuses to
 # issue any policy over a reserved workspace.
 UNAUTHENTICATED_WORKSPACE_OWNER = "xb500"
-
-# TRANSITIONAL -- delete in the release after every anonymous consumer reads
-# `demo`. These are the two collections odata.opteryx let through anonymously
-# (its old ANONYMOUS_EXEMPT_PAIRS), declared here so the library can be the one
-# place that decision lives while the consumers move. Not `public.*`: odata
-# never let an anonymous caller past these two, and widening the library to the
-# whole workspace during a migration would be the opposite of the point.
-#
-# Each collection takes its exact name as well as `.*`, for the reason the
-# personal namespace does (see `implicit_grants`): `public.security.*` does not
-# cover `public.security`, and the old blanket `public.*` read that anonymous
-# sessions held did.
-_TRANSITIONAL_ANONYMOUS_PATTERNS: tuple[str, ...] = (
-    "public.security",
-    "public.security.*",
-    "public.geopolitics",
-    "public.geopolitics.*",
-)
 
 # The name each implicit grant is reported under wherever a service has to say
 # WHY a caller may read something (odata's `policy` field, for one). Declared
@@ -179,11 +161,6 @@ def _implicit(identity: str | None) -> list[tuple[Grant, str]]:
             GLOBAL_UNAUTHENTICATED_READ_POLICY,
         )
     )
-    if not identity:
-        held.extend(
-            (Grant(role="reader", pattern=pattern), GLOBAL_UNAUTHENTICATED_READ_POLICY)
-            for pattern in _TRANSITIONAL_ANONYMOUS_PATTERNS
-        )
     return held
 
 
@@ -211,10 +188,10 @@ def implicitly_readable_workspaces(identity: str | None) -> frozenset[str]:
     """The workspaces in which `identity` can read something with no issued policy.
 
     Where a listing has to start for a caller whose token carries no policies
-    -- an anonymous one above all. It is a superset: an anonymous caller is
-    given `public` here only for the transitional collections, so each dataset
-    found there still has to clear `implicit_access` (or `can_perform_action`)
-    before it is shown.
+    -- an anonymous one above all. It is a superset: a workspace is named here
+    when any of its resources is implicitly readable, so each dataset found
+    still has to clear `implicit_access` (or `can_perform_action`) before it is
+    shown.
     """
     return frozenset(
         normalize(held.pattern).split(".", 1)[0]
@@ -261,8 +238,7 @@ def implicit_grants(identity: str | None) -> list[Grant]:
 
     An anonymous session (no identity) holds no personal namespace: there is
     no `personal.<nobody>` for it to own. It reads `demo.*` and nothing else
-    (`UNAUTHENTICATED_WORKSPACE`), plus -- until they are deleted -- the
-    `_TRANSITIONAL_ANONYMOUS_PATTERNS`. `public` and `samples` need a signed-in
+    (`UNAUTHENTICATED_WORKSPACE`). `public` and `samples` need a signed-in
     identity: being readable without one is the whole of what `demo` is for.
 
     The personal namespace takes TWO patterns, because `fnmatch` does not

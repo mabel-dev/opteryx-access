@@ -401,7 +401,6 @@ Some access is held without a policy having been issued for it, declared once in
 | Any identity | `reader` on `public.*` | Curated open data, readable by every signed-in account |
 | Any identity | `reader` on `samples.*` | Bundles to fork with `CREATE TABLE ... CLONE`; not listed |
 | Everyone, signed in or not | `reader` on `demo.*` | The ONE workspace readable without a token: what the demo site, the docs' "try it" panels and the notebooks read anonymously; not listed |
-| Anonymous only, TRANSITIONAL | `reader` on `public.security[.*]`, `public.geopolitics[.*]` | What odata.opteryx let through anonymously before `demo` existed; deleted once every anonymous consumer reads `demo` |
 | `PLATFORM_IDENTITIES` | `writer` on `public.*`, `samples.*`, `demo.*` | Something has to load and compact them |
 | `xb500` only | `owner` on `demo.*` (in place of `writer`) | The demo is rebuilt by `CREATE OR REPLACE TABLE` copies out of `public`, and replacing a table is the DROP tier |
 

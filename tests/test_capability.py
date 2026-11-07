@@ -250,16 +250,10 @@ def test_grants_lists_implicit_first_then_issued():
 
 def test_grants_for_an_anonymous_session_has_no_personal_namespace():
     rows = capability().grants("", [])
-    # `demo` and nothing else (bar the transitional `public` collections): an
-    # anonymous session owns no personal namespace, holds no issued policy, and
-    # reads neither `public` nor `samples` -- those need a signed-in identity.
-    assert [(r["pattern"], r["role"]) for r in rows] == [
-        ("demo.*", "reader"),
-        ("public.security", "reader"),
-        ("public.security.*", "reader"),
-        ("public.geopolitics", "reader"),
-        ("public.geopolitics.*", "reader"),
-    ]
+    # `demo` and nothing else: an anonymous session owns no personal namespace,
+    # holds no issued policy, and reads neither `public` nor `samples` -- those
+    # need a signed-in identity.
+    assert [(r["pattern"], r["role"]) for r in rows] == [("demo.*", "reader")]
 
 
 def test_grants_actions_are_derived_from_the_enforced_table():
