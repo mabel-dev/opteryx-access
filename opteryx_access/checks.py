@@ -30,9 +30,8 @@ names the identity system issues. They are consulted before everything else,
 for the reason spelled out in `can_perform_action`.
 """
 
-from collections.abc import Iterable
-
 import os
+from collections.abc import Iterable
 
 from opteryx_access.actions import action_allowed_for_role
 from opteryx_access.entitlements import entitlement_permits
@@ -40,6 +39,7 @@ from opteryx_access.entitlements import entitlement_permits_workspace_action
 from opteryx_access.models import Entitlement
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
+from opteryx_access.patterns import RESERVED_WORKSPACES
 from opteryx_access.patterns import escape_glob
 from opteryx_access.patterns import is_engine_private
 from opteryx_access.patterns import normalize
@@ -97,6 +97,138 @@ def maintenance_identity() -> str:
     )
 
 
+# The workspace an anonymous session can read -- the ONLY one, once the
+# transitional grants below are gone. It holds what the public demo site, the
+# docs' "try it" panels and the notebooks read without a token, so that nothing
+# a newcomer sees in `public` has to double as the open internet's surface.
+UNAUTHENTICATED_WORKSPACE = "demo"
+
+# TRANSITIONAL -- delete in the release after every anonymous consumer reads
+# `demo`. These are the two collections odata.opteryx let through anonymously
+# (its old ANONYMOUS_EXEMPT_PAIRS), declared here so the library can be the one
+# place that decision lives while the consumers move. Not `public.*`: odata
+# never let an anonymous caller past these two, and widening the library to the
+# whole workspace during a migration would be the opposite of the point.
+#
+# Each collection takes its exact name as well as `.*`, for the reason the
+# personal namespace does (see `implicit_grants`): `public.security.*` does not
+# cover `public.security`, and the old blanket `public.*` read that anonymous
+# sessions held did.
+_TRANSITIONAL_ANONYMOUS_PATTERNS: tuple[str, ...] = (
+    "public.security",
+    "public.security.*",
+    "public.geopolitics",
+    "public.geopolitics.*",
+)
+
+# The name each implicit grant is reported under wherever a service has to say
+# WHY a caller may read something (odata's `policy` field, for one). Declared
+# here, beside the grants they label, so a service never has to work out for
+# itself which hardcoded rule applied -- that working-out is an access decision.
+PERSONAL_POLICY = "always-allow-personal"
+GLOBAL_UNAUTHENTICATED_READ_POLICY = "always-allow-read-global-unauthenticated"
+AUTHENTICATED_READ_POLICY = "always-allow-read-any-authenticated-user"
+PLATFORM_MAINTENANCE_POLICY = "always-allow-platform-maintenance"
+VIRTUAL_INFORMATION_SCHEMA_POLICY = "virtual-information-schema"
+
+
+def _implicit(identity: str | None) -> list[tuple[Grant, str]]:
+    """Every implicit grant `identity` holds, in evaluation order, with its label.
+
+    The single declaration behind `implicit_grants` and `implicit_access`; see
+    `implicit_grants` for what each grant is and why.
+    """
+    held: list[tuple[Grant, str]] = []
+    if identity:
+        normalized = normalize(identity)
+        personal = f"personal.{escape_glob(normalized)}"
+        held.append((Grant(role="owner", pattern=personal), PERSONAL_POLICY))
+        held.append((Grant(role="owner", pattern=f"{personal}.*"), PERSONAL_POLICY))
+        if normalized in PLATFORM_IDENTITIES:
+            # ORDER IS LOAD-BEARING: `can_perform_action` answers from the first
+            # implicit grant whose pattern matches and does not look further, so
+            # these have to precede the reader grants below or they would never
+            # be reached.
+            for workspace in ("public", "samples", UNAUTHENTICATED_WORKSPACE):
+                held.append(
+                    (Grant(role="writer", pattern=f"{workspace}.*"), PLATFORM_MAINTENANCE_POLICY)
+                )
+    if identity:
+        held.append((Grant(role="reader", pattern="public.*"), AUTHENTICATED_READ_POLICY))
+        held.append((Grant(role="reader", pattern="samples.*"), AUTHENTICATED_READ_POLICY))
+    held.append(
+        (
+            Grant(role="reader", pattern=f"{UNAUTHENTICATED_WORKSPACE}.*"),
+            GLOBAL_UNAUTHENTICATED_READ_POLICY,
+        )
+    )
+    if not identity:
+        held.extend(
+            (Grant(role="reader", pattern=pattern), GLOBAL_UNAUTHENTICATED_READ_POLICY)
+            for pattern in _TRANSITIONAL_ANONYMOUS_PATTERNS
+        )
+    return held
+
+
+def implicit_access(resource: str, identity: str | None) -> tuple[Grant, str] | None:
+    """The implicit grant that decides `resource` for `identity`, and its label.
+
+    The first implicit grant whose pattern covers `resource` -- the same one
+    `can_perform_action` answers from -- or None when no implicit grant reaches
+    it and the decision belongs to issued policies. Engine-private names are
+    None too: no grant reaches them, implicit or otherwise.
+
+    For the service that has to report WHY a read is allowed: the label is the
+    rule that applied (`PERSONAL_POLICY`, `AUTHENTICATED_READ_POLICY`, ...), so
+    no service re-derives it from the workspace name.
+    """
+    if resource.count(".") == 0 or is_engine_private(resource):
+        return None
+    for held, label in _implicit(identity):
+        if resource_matches(resource, held.pattern):
+            return held, label
+    return None
+
+
+def implicitly_readable_workspaces(identity: str | None) -> frozenset[str]:
+    """The workspaces in which `identity` can read something with no issued policy.
+
+    Where a listing has to start for a caller whose token carries no policies
+    -- an anonymous one above all. It is a superset: an anonymous caller is
+    given `public` here only for the transitional collections, so each dataset
+    found there still has to clear `implicit_access` (or `can_perform_action`)
+    before it is shown.
+    """
+    return frozenset(
+        normalize(held.pattern).split(".", 1)[0]
+        for held, _label in _implicit(identity)
+        if action_allowed_for_role(held.role, "READ")
+    )
+
+
+def workspace_roles(
+    workspace: str, identity: str | None, grants: Iterable[Grant] = ()
+) -> list[str]:
+    """Every role `identity` holds anywhere in `workspace`, implicit grants first.
+
+    For decisions about a workspace as a whole rather than one resource in it
+    -- whether its `information_schema` is visible, and as what. Implicit
+    grants come first, as they are evaluated first everywhere else; issued
+    grants follow in the order given. Duplicates are kept: the order is the
+    answer, and callers take the first role that permits what they need.
+    """
+    target = normalize(workspace)
+    roles = [
+        held.role
+        for held, _label in _implicit(identity)
+        if normalize(held.pattern).split(".", 1)[0] == target
+    ]
+    roles.extend(
+        issued.role for issued in grants if normalize(issued.pattern).split(".", 1)[0] == target
+    )
+    return roles
+
+
 def implicit_grants(identity: str | None) -> list[Grant]:
     """Grants every session holds without a policy being issued for them.
 
@@ -111,7 +243,10 @@ def implicit_grants(identity: str | None) -> list[Grant]:
     namespace the caller owns.
 
     An anonymous session (no identity) holds no personal namespace: there is
-    no `personal.<nobody>` for it to own.
+    no `personal.<nobody>` for it to own. It reads `demo.*` and nothing else
+    (`UNAUTHENTICATED_WORKSPACE`), plus -- until they are deleted -- the
+    `_TRANSITIONAL_ANONYMOUS_PATTERNS`. `public` and `samples` need a signed-in
+    identity: being readable without one is the whole of what `demo` is for.
 
     The personal namespace takes TWO patterns, because `fnmatch` does not
     treat `personal.alice.*` as covering `personal.alice` -- the trailing
@@ -125,38 +260,29 @@ def implicit_grants(identity: str | None) -> list[Grant]:
     the `public.*` pair below their order is not load-bearing.
 
     A platform identity (see `PLATFORM_IDENTITIES`) holds `writer` on
-    `public.*` and `samples.*` rather than `reader`. Writer, not owner: these
-    identities load and compact what is in them, and neither dropping one of
-    those datasets nor granting anyone access to one is theirs to do.
+    `public.*`, `samples.*` and `demo.*` rather than `reader`. Writer, not
+    owner: these identities load and compact what is in them, and neither
+    dropping one of those datasets nor granting anyone access to one is theirs
+    to do.
 
-    `samples.*` is UNIVERSALLY READABLE and read-only, exactly as `public.*`
-    is, so anyone can query a sample or fork one with `CREATE TABLE ... CLONE`
-    without a policy being issued to them.
+    `samples.*` is readable by ANY SIGNED-IN IDENTITY and read-only, exactly as
+    `public.*` is, so anyone with an account can query a sample or fork one
+    with `CREATE TABLE ... CLONE` without a policy being issued to them. A
+    fork also needs CREATE on its target, which an anonymous session holds
+    nowhere, so withholding `samples` from anonymous callers costs no fork.
 
-    It is NOT LISTED, and that follows from being here rather than from a
-    second rule somewhere: implicit grants never appear in a token's `policies`
-    claim, and odata.opteryx builds its service document -- which is what draws
-    Studio's catalog tree -- from that claim. `public` is in the tree only
-    because the service document unions it in by name. `samples` deliberately
-    is not: five scale factors of TPC-H would be forty datasets in the catalog
-    of every account on the platform, forever, to be forked once. Someone who
-    wants to look before forking can still `SELECT` from it.
+    `samples` and `demo` are NOT LISTED, and that follows from being here
+    rather than from a second rule somewhere: implicit grants never appear in a
+    token's `policies` claim, and odata.opteryx builds its service document --
+    which is what draws Studio's catalog tree -- from that claim. `public` is in
+    the tree only because the service document unions it in by name. `samples`
+    deliberately is not: five scale factors of TPC-H would be forty datasets in
+    the catalog of every account on the platform, forever, to be forked once.
+    Someone who wants to look before forking can still `SELECT` from it.
+
+    Each grant's reporting label is available through `implicit_access`.
     """
-    grants = []
-    if identity:
-        normalized = normalize(identity)
-        grants.append(Grant(role="owner", pattern=f"personal.{escape_glob(normalized)}"))
-        grants.append(Grant(role="owner", pattern=f"personal.{escape_glob(normalized)}.*"))
-        if normalized in PLATFORM_IDENTITIES:
-            # ORDER IS LOAD-BEARING: `can_perform_action` answers from the first
-            # implicit grant whose pattern matches and does not look further, so
-            # this has to precede the reader grant below or it would never be
-            # reached.
-            grants.append(Grant(role="writer", pattern="public.*"))
-            grants.append(Grant(role="writer", pattern="samples.*"))
-    grants.append(Grant(role="reader", pattern="public.*"))
-    grants.append(Grant(role="reader", pattern="samples.*"))
-    return grants
+    return [held for held, _label in _implicit(identity)]
 
 
 def can_perform_action(
@@ -215,6 +341,17 @@ def can_perform_action(
     for implicit in implicit_grants(identity):
         if resource_matches(resource, implicit.pattern):
             return action_allowed_for_role(implicit.role, action)
+
+    # A RESERVED workspace is decided by implicit grants alone. No policy can be
+    # issued over one (`validate_pattern`), so falling through to `grants` here
+    # could only ever reach a policy that should not exist -- one written before
+    # the name was reserved, or straight into the store. This used to hold only
+    # by accident of every caller carrying a `public.*` reader grant that
+    # matched first; an anonymous session no longer does, and `public.security`
+    # (the collection itself, which `public.security.*` does not cover) would
+    # otherwise have been decided by whatever the caller's grants said.
+    if normalize(resource).split(".", 1)[0] in RESERVED_WORKSPACES:
+        return False
 
     for grant in grants:
         if action_allowed_for_role(grant.role, action) and resource_matches(

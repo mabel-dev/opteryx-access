@@ -38,11 +38,11 @@ _LITERAL_SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
 _GLOB_CHARACTERS = "*?["
 
 # Workspaces that are never grantable through a policy -- access to them is
-# decided by a mechanism other than the access-policy documents this package
-# manages (a hardcoded anonymous allowlist for "public", owner-only hardcoding
-# for "personal" -- see odata.opteryx; an implicit reader grant for "samples"
-# -- see `implicit_grants`).
-RESERVED_WORKSPACES: tuple[str, ...] = ("public", "personal", "samples")
+# decided by `implicit_grants` instead of the access-policy documents this
+# package manages: owner-only for "personal", a reader grant for every
+# signed-in identity on "public" and "samples", and a reader grant for
+# everyone, signed in or not, on "demo".
+RESERVED_WORKSPACES: tuple[str, ...] = ("public", "personal", "samples", "demo")
 
 # Synthetic per-workspace collection generated on the fly for whoever already
 # has access to that workspace. It has no real catalog entry of its own, so it
