@@ -398,8 +398,21 @@ Some access is held without a policy having been issued for it, declared once in
 |---|---|---|
 | Any identity | `owner` on `personal.<identity>` | Your own collection itself -- `personal.<identity>.*` does not fnmatch the bare two-part name, and `CREATE COLLECTION` / `DROP COLLECTION` / `LOAD SAMPLE` all check it |
 | Any identity | `owner` on `personal.<identity>.*` | Your own namespace |
-| Everyone | `reader` on `public.*` | Shared open data, readable by all |
-| `PLATFORM_IDENTITIES` | `writer` on `public.*` | Something has to load and compact it |
+| Any identity | `reader` on `public.*` | Curated open data, readable by every signed-in account |
+| Any identity | `reader` on `samples.*` | Bundles to fork with `CREATE TABLE ... CLONE`; not listed |
+| Everyone, signed in or not | `reader` on `demo.*` | The ONE workspace readable without a token: what the demo site, the docs' "try it" panels and the notebooks read anonymously; not listed |
+| Anonymous only, TRANSITIONAL | `reader` on `public.security[.*]`, `public.geopolitics[.*]` | What odata.opteryx let through anonymously before `demo` existed; deleted once every anonymous consumer reads `demo` |
+| `PLATFORM_IDENTITIES` | `writer` on `public.*`, `samples.*`, `demo.*` | Something has to load and compact them |
+
+Each is reported under a policy label, so a service saying WHY a caller may
+read something never works it out from the workspace name: `implicit_access`
+returns the deciding grant and its label (`always-allow-personal`,
+`always-allow-read-any-authenticated-user`,
+`always-allow-read-global-unauthenticated`,
+`always-allow-platform-maintenance`). `implicitly_readable_workspaces` is where
+a listing for a caller with no issued policies starts, and `workspace_roles`
+answers "what does this caller hold anywhere in this workspace" -- the
+question behind `information_schema` visibility.
 
 Note the shape: an identity-keyed exception to what a role could confer, which
 no policy can be written for. Entitlements generalize it to authority the
@@ -409,7 +422,9 @@ above -- and are consulted just ahead of the table below.
 These are checked **before** issued grants and **cap** what they cover: a
 resource in `public.` or in your own `personal.` is answered there and never
 falls through, which is what makes `public.` read-only however broad a policy
-someone holds over it.
+someone holds over it. A resource in ANY reserved workspace that no implicit
+grant covers is refused outright rather than handed to issued grants -- no
+policy could have been issued there, so none is honoured.
 
 `public` is where curated open data lives -- GDELT, vulnerability feeds -- and
 something has to write it and keep it compacted. Because `public` is a reserved

@@ -89,8 +89,28 @@ def test_implicit_public_is_read_only_regardless_of_issued_policy():
     # policy claims otherwise -- implicit grants short-circuit and never fall
     # through to `grants`.
     grants = [Grant(role="owner", pattern="public.*")]
-    assert can_perform_action(grants, "public.security", "READ")
-    assert not can_perform_action(grants, "public.security", "DELETE")
+    assert can_perform_action(grants, "public.security", "READ", identity="alice")
+    assert not can_perform_action(grants, "public.security", "DELETE", identity="alice")
+
+
+def test_reserved_workspaces_never_fall_through_to_issued_grants():
+    # The cap above used to hold only because every caller carried a `public.*`
+    # reader grant that matched first. An anonymous session no longer does, so
+    # the cap is a property of the reserved NAME: a resource there that no
+    # implicit grant covers is refused, whatever an issued grant says -- a
+    # policy that could not have been issued cannot be honoured either.
+    grants = [Grant(role="owner", pattern="public.*")]
+    assert not can_perform_action(grants, "public.astronomy.planets", "READ")
+    assert not can_perform_action(grants, "public.astronomy.planets", "DELETE")
+    assert not can_perform_action(
+        [Grant(role="owner", pattern="samples.*")], "samples.tpch_sf1.lineitem", "READ"
+    )
+    assert not can_perform_action(
+        [Grant(role="owner", pattern="demo.*")], "demo.security.cisa_kev", "WRITE", identity="alice"
+    )
+    assert not can_perform_action(
+        [Grant(role="owner", pattern="personal.bob.*")], "personal.bob.notes", "READ", identity="alice"
+    )
 
 
 def test_platform_identities_may_write_public():
@@ -141,7 +161,8 @@ def test_ordinary_identity_still_capped_read_only_on_public():
 def test_anonymous_has_no_personal_namespace():
     grants = implicit_grants(None)
     assert all(not g.pattern.startswith("personal.") for g in grants)
-    assert [g.role for g in grants if g.pattern == "public.*"] == ["reader"]
+    assert [g.role for g in grants if g.pattern == "demo.*"] == ["reader"]
+    assert not [g for g in grants if g.pattern in ("public.*", "samples.*")]
 
 
 def test_can_perform_workspace_action_requires_whole_workspace_coverage():

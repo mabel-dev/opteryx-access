@@ -44,12 +44,21 @@ from opteryx_access.audit import AUDIT_LOGGER_NAME
 from opteryx_access.audit import set_audit_sink
 from opteryx_access.capability import PermissionsCapability
 from opteryx_access.capability import capability
+from opteryx_access.checks import AUTHENTICATED_READ_POLICY
+from opteryx_access.checks import GLOBAL_UNAUTHENTICATED_READ_POLICY
+from opteryx_access.checks import PERSONAL_POLICY
 from opteryx_access.checks import PLATFORM_IDENTITIES
+from opteryx_access.checks import PLATFORM_MAINTENANCE_POLICY
+from opteryx_access.checks import UNAUTHENTICATED_WORKSPACE
+from opteryx_access.checks import VIRTUAL_INFORMATION_SCHEMA_POLICY
 from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
 from opteryx_access.checks import can_perform_workspace_action
 from opteryx_access.checks import has_workspace_access
+from opteryx_access.checks import implicit_access
 from opteryx_access.checks import implicit_grants
+from opteryx_access.checks import implicitly_readable_workspaces
+from opteryx_access.checks import workspace_roles
 from opteryx_access.entitlements import ENTITLEABLE_ACTIONS
 from opteryx_access.entitlements import ENTITLEMENT_KINDS
 from opteryx_access.entitlements import SCOPE_SEPARATOR
@@ -98,14 +107,20 @@ from opteryx_access.store import PolicyStore
 __all__ = [
     "ACTION_ROLES",
     "AUDIT_LOGGER_NAME",
+    "AUTHENTICATED_READ_POLICY",
     "DATA_ACTIONS",
     "ENTITLEABLE_ACTIONS",
     "ENTITLEMENT_KINDS",
+    "GLOBAL_UNAUTHENTICATED_READ_POLICY",
+    "PERSONAL_POLICY",
     "PLATFORM_IDENTITIES",
+    "PLATFORM_MAINTENANCE_POLICY",
     "POLICY_ADMINISTRATION_ACTIONS",
     "RESERVED_WORKSPACES",
     "ROLES",
     "SCOPE_SEPARATOR",
+    "UNAUTHENTICATED_WORKSPACE",
+    "VIRTUAL_INFORMATION_SCHEMA_POLICY",
     "AccessDeniedError",
     "Entitlement",
     "Grant",
@@ -136,7 +151,9 @@ __all__ = [
     "grant",
     "grants_for_principal",
     "has_workspace_access",
+    "implicit_access",
     "implicit_grants",
+    "implicitly_readable_workspaces",
     "is_valid_role",
     "owned_by",
     "parse_entitlement_claim",
@@ -155,4 +172,5 @@ __all__ = [
     "validate_entitlement_pattern",
     "validate_pattern",
     "validate_principal",
+    "workspace_roles",
 ]

@@ -95,11 +95,13 @@ def test_public_stays_read_only_even_under_an_owner_policy():
     assert not cap.can_perform_action(context, "public.security", "DELETE")
 
 
-def test_an_anonymous_session_holds_only_public_read():
+def test_an_anonymous_session_holds_only_demo_read():
     context = FakeExecutionContext(user=None)
     cap = capability()
-    assert cap.can_perform_action(context, "public.security", "READ")
-    assert not cap.can_perform_action(context, "public.security", "WRITE")
+    assert cap.can_perform_action(context, "demo.security.cisa_kev", "READ")
+    assert not cap.can_perform_action(context, "demo.security.cisa_kev", "WRITE")
+    assert not cap.can_perform_action(context, "public.astronomy.planets", "READ")
+    assert not cap.can_perform_action(context, "samples.tpch_sf1.lineitem", "READ")
     assert not cap.can_perform_action(context, "analytics.sales.q1", "READ")
 
 
@@ -241,17 +243,22 @@ def test_grants_lists_implicit_first_then_issued():
         ("personal.alice.*", "owner"),
         ("public.*", "reader"),
         ("samples.*", "reader"),
+        ("demo.*", "reader"),
         ("analytics.*", "writer"),
     ]
 
 
 def test_grants_for_an_anonymous_session_has_no_personal_namespace():
     rows = capability().grants("", [])
-    # Both universally-readable namespaces, and nothing else: an anonymous
-    # session owns no personal namespace and holds no issued policy.
+    # `demo` and nothing else (bar the transitional `public` collections): an
+    # anonymous session owns no personal namespace, holds no issued policy, and
+    # reads neither `public` nor `samples` -- those need a signed-in identity.
     assert [(r["pattern"], r["role"]) for r in rows] == [
-        ("public.*", "reader"),
-        ("samples.*", "reader"),
+        ("demo.*", "reader"),
+        ("public.security", "reader"),
+        ("public.security.*", "reader"),
+        ("public.geopolitics", "reader"),
+        ("public.geopolitics.*", "reader"),
     ]
 
 
@@ -314,6 +321,7 @@ def test_reported_grants_agree_with_what_is_enforced():
         "personal.olive.*": "personal.olive.tbl",
         "public.*": "public.coll.tbl",
         "samples.*": "samples.tpch_sf1.lineitem",
+        "demo.*": "demo.security.cisa_kev",
         "ws.*": "ws.coll.tbl",
     }
     for row in cap.grants(context.user, context.access_policies):
@@ -331,6 +339,7 @@ def test_grants_skips_malformed_policies():
         "personal.alice.*",
         "public.*",
         "samples.*",
+        "demo.*",
         "ws.*",
     ]
 
@@ -558,7 +567,7 @@ def test_show_grants_reports_entitlements_first():
     # row for one that was granted.
     assert rows[0]["role"] not in ROLES
     # The implicit and issued grants still follow, unchanged.
-    assert [row["role"] for row in rows[2:]] == ["owner", "owner", "reader", "reader"]
+    assert [row["role"] for row in rows[2:]] == ["owner", "owner", "reader", "reader", "reader"]
 
 
 def test_show_grants_without_the_names_is_unchanged():

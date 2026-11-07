@@ -1,10 +1,10 @@
-"""`samples` is universally readable and never listed.
+"""`samples` is readable by any signed-in identity and never listed.
 
 Two properties, and they are held by ONE mechanism rather than two, which is
 why they are tested together:
 
-* everyone can READ `samples.*` and nobody can write it, so anyone can query a
-  sample or fork one with `CREATE TABLE ... CLONE` without a policy being
+* every signed-in identity can READ `samples.*` and nobody can write it, so
+  anyone with an account can query a sample or fork one with `CREATE TABLE ... CLONE` without a policy being
   issued to them;
 * it is not in anyone's catalog tree, because the grant is IMPLICIT - implicit
   grants never reach a token's `policies` claim, and odata.opteryx draws the
@@ -40,10 +40,17 @@ def test_any_identity_can_read_a_sample():
     assert can_perform_action(_grants("alice"), SAMPLE, "READ", identity="alice")
 
 
-def test_an_anonymous_session_can_read_a_sample():
+def test_an_anonymous_session_cannot_read_a_sample():
+    # Readable by any SIGNED-IN identity, not by everyone: `demo` is the one
+    # workspace open without a token. Nothing is lost by it -- a fork needs
+    # CREATE on its target, and an anonymous session holds that nowhere.
+    assert not can_perform_action(_grants(None), SAMPLE, "READ", identity=None)
+
+
+def test_a_new_account_with_no_policies_can_read_a_sample():
     # Forking needs READ on the upstream, and an account that has just been
     # created holds no issued policy at all.
-    assert can_perform_action(_grants(None), SAMPLE, "READ", identity=None)
+    assert can_perform_action([], SAMPLE, "READ", identity="newcomer")
 
 
 def test_the_collection_is_readable_too():
