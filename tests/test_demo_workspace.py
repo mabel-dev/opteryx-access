@@ -98,12 +98,26 @@ def test_an_issued_policy_cannot_widen_demo():
     assert not _can(DEMO, "WRITE", None, issued)
 
 
-@pytest.mark.parametrize("identity", ["xb500", "federator"])
-def test_the_platform_identities_maintain_demo(identity):
-    assert _can(DEMO, "WRITE", identity)
-    assert _can(DEMO, "REFRESH", identity)
-    # Writer, not owner: dropping a dataset is not the platform's to do.
-    assert not _can(DEMO, "DROP", identity)
+def test_xb500_owns_demo():
+    # The demo is rebuilt by `CREATE OR REPLACE TABLE demo... AS SELECT` copies,
+    # and replacing an existing table is the DROP tier.
+    assert _can(DEMO, "WRITE", "xb500")
+    assert _can(DEMO, "REFRESH", "xb500")
+    assert _can(DEMO, "DROP", "xb500")
+    assert _can(DEMO, "AUTOMATE", "xb500")
+
+
+def test_federator_only_writes_demo():
+    # Its credential is shipped to every committing service: no drop rights over
+    # anything standing.
+    assert _can(DEMO, "WRITE", "federator")
+    assert not _can(DEMO, "DROP", "federator")
+
+
+def test_owning_demo_confers_no_policy_administration():
+    # Owner includes GRANT, but no policy can be issued over a reserved workspace.
+    with pytest.raises(InvalidPatternError):
+        validate_pattern("demo.security.*")
 
 
 def test_no_policy_may_be_written_over_demo():
@@ -148,7 +162,8 @@ def test_the_demo_grant_is_implicit_not_issued():
         ("public.security.cisa_kev", None, "reader", GLOBAL_UNAUTHENTICATED_READ_POLICY),
         ("personal.alice.notes", "alice", "owner", PERSONAL_POLICY),
         ("public.astronomy.planets", "xb500", "writer", PLATFORM_MAINTENANCE_POLICY),
-        (DEMO, "xb500", "writer", PLATFORM_MAINTENANCE_POLICY),
+        (DEMO, "xb500", "owner", PLATFORM_MAINTENANCE_POLICY),
+        (DEMO, "federator", "writer", PLATFORM_MAINTENANCE_POLICY),
     ],
 )
 def test_implicit_access_reports_the_rule_that_applied(resource, identity, role, label):

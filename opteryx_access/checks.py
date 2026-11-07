@@ -103,6 +103,17 @@ def maintenance_identity() -> str:
 # a newcomer sees in `public` has to double as the open internet's surface.
 UNAUTHENTICATED_WORKSPACE = "demo"
 
+# The one identity that OWNS `demo` rather than merely writing it. The demo's
+# data arrives as `CREATE OR REPLACE TABLE demo.... AS SELECT ...` copies run by
+# tasks in `public`, and replacing an existing table is the DROP tier -- owner.
+# Owner, not writer, for this identity alone: `xb500` runs the house automation
+# (the same identity opteryx-catalog lets own triggers in house workspaces),
+# while `federator`'s credential is shipped to every service that commits, which
+# makes it the wrong thing to hand drop rights over anything standing. Owner here
+# confers no policy administration in practice: `validate_pattern` refuses to
+# issue any policy over a reserved workspace.
+UNAUTHENTICATED_WORKSPACE_OWNER = "xb500"
+
 # TRANSITIONAL -- delete in the release after every anonymous consumer reads
 # `demo`. These are the two collections odata.opteryx let through anonymously
 # (its old ANONYMOUS_EXEMPT_PAIRS), declared here so the library can be the one
@@ -150,8 +161,14 @@ def _implicit(identity: str | None) -> list[tuple[Grant, str]]:
             # these have to precede the reader grants below or they would never
             # be reached.
             for workspace in ("public", "samples", UNAUTHENTICATED_WORKSPACE):
+                role = (
+                    "owner"
+                    if workspace == UNAUTHENTICATED_WORKSPACE
+                    and normalized == UNAUTHENTICATED_WORKSPACE_OWNER
+                    else "writer"
+                )
                 held.append(
-                    (Grant(role="writer", pattern=f"{workspace}.*"), PLATFORM_MAINTENANCE_POLICY)
+                    (Grant(role=role, pattern=f"{workspace}.*"), PLATFORM_MAINTENANCE_POLICY)
                 )
     if identity:
         held.append((Grant(role="reader", pattern="public.*"), AUTHENTICATED_READ_POLICY))
@@ -263,7 +280,9 @@ def implicit_grants(identity: str | None) -> list[Grant]:
     `public.*`, `samples.*` and `demo.*` rather than `reader`. Writer, not
     owner: these identities load and compact what is in them, and neither
     dropping one of those datasets nor granting anyone access to one is theirs
-    to do.
+    to do. The one exception is `UNAUTHENTICATED_WORKSPACE_OWNER` (`xb500`),
+    which OWNS `demo.*`: the demo is rebuilt by `CREATE OR REPLACE` copies out
+    of `public`, and replacing a table is the DROP tier.
 
     `samples.*` is readable by ANY SIGNED-IN IDENTITY and read-only, exactly as
     `public.*` is, so anyone with an account can query a sample or fork one

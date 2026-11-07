@@ -50,6 +50,7 @@ from opteryx_access.checks import PERSONAL_POLICY
 from opteryx_access.checks import PLATFORM_IDENTITIES
 from opteryx_access.checks import PLATFORM_MAINTENANCE_POLICY
 from opteryx_access.checks import UNAUTHENTICATED_WORKSPACE
+from opteryx_access.checks import UNAUTHENTICATED_WORKSPACE_OWNER
 from opteryx_access.checks import VIRTUAL_INFORMATION_SCHEMA_POLICY
 from opteryx_access.checks import can_administer_pattern
 from opteryx_access.checks import can_perform_action
@@ -120,6 +121,7 @@ __all__ = [
     "ROLES",
     "SCOPE_SEPARATOR",
     "UNAUTHENTICATED_WORKSPACE",
+    "UNAUTHENTICATED_WORKSPACE_OWNER",
     "VIRTUAL_INFORMATION_SCHEMA_POLICY",
     "AccessDeniedError",
     "Entitlement",
