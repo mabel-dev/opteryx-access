@@ -172,7 +172,7 @@ def _validate_pattern_shape(pattern: str) -> list[str]:
     for segment in segments:
         if segment == WILDCARD_SEGMENT:
             continue
-        if not _LITERAL_SEGMENT.match(segment):
+        if not _LITERAL_SEGMENT.fullmatch(segment):
             raise InvalidPatternError(
                 f"pattern {pattern!r} is not allowed: {segment!r} is not a usable name -- each "
                 "part must be '*' or start with a letter and use only letters, digits, and "
@@ -217,6 +217,59 @@ def validate_pattern(pattern: str) -> str:
         )
 
     return ".".join(segments)
+
+
+def validate_workspace(workspace: str) -> str:
+    """Check `workspace` is a usable workspace name exactly as given, returning it.
+
+    One literal segment, and not a reserved workspace. Checked as given, NOT
+    normalized: a workspace name is a store key, and anything normalization
+    would change (`Victim`, a Kelvin sign that lowercases to `k`, padding)
+    names a different key than the pattern built from it. That mismatch is the
+    takeover: an owner policy filed under the key `victim.*` or `Victim`
+    carries a pattern that matches every resource in `victim`, while `victim`'s
+    own policy collection never sees it. So such a name is refused, never
+    cleaned up.
+
+    Raises:
+        InvalidPatternError: if `workspace` is not one literal name, or is reserved.
+    """
+    if not _LITERAL_SEGMENT.fullmatch(workspace):
+        raise InvalidPatternError(
+            f"workspace {workspace!r} is not allowed: a workspace name must start with a "
+            "lowercase letter and use only lowercase letters, digits, and underscores"
+        )
+
+    if workspace in RESERVED_WORKSPACES:
+        raise InvalidPatternError(
+            f"workspace {workspace!r} is not allowed: it is reserved and cannot hold policies"
+        )
+
+    return workspace
+
+
+def validate_workspace_pattern(workspace: str, pattern: str) -> str:
+    """Check `pattern` is a usable policy pattern inside `workspace`, returning
+    it normalized.
+
+    The guard every policy writer goes through before a policy is filed under
+    `workspace`: the store key must be a valid workspace name, and the pattern
+    must not reach outside it. Without the second half, a policy written under
+    one workspace's key can carry a pattern naming another workspace, and
+    whatever mints tokens from stored policies honours the pattern, not the key.
+
+    Raises:
+        InvalidPatternError: if `workspace` fails `validate_workspace`, `pattern`
+            fails `validate_pattern`, or `pattern` names a different workspace.
+    """
+    workspace = validate_workspace(workspace)
+    pattern = validate_pattern(pattern)
+    if pattern.split(".", 1)[0] != workspace:
+        raise InvalidPatternError(
+            f"pattern {pattern!r} is not allowed in workspace {workspace!r}: a policy can "
+            "only cover resources in the workspace it is stored in"
+        )
+    return pattern
 
 
 def validate_entitlement_pattern(pattern: str) -> str:

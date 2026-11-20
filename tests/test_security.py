@@ -18,9 +18,12 @@ from opteryx_access.exceptions import InvalidRoleError
 from opteryx_access.exceptions import SelfAccessError
 from opteryx_access.grants import bootstrap_workspace
 from opteryx_access.grants import grant
+from opteryx_access.grants import update_grant
 from opteryx_access.models import Grant
 from opteryx_access.models import Policy
 from opteryx_access.patterns import validate_pattern
+from opteryx_access.patterns import validate_workspace
+from opteryx_access.patterns import validate_workspace_pattern
 from opteryx_access.roles import ROLES
 
 # ---------------------------------------------------------------------------
@@ -309,3 +312,116 @@ def test_owner_may_grant_owner_to_a_third_party():
         pattern="analytics.sales.*",
     )
     assert store.get_policy("analytics", policy_id).role == "owner"
+
+
+# --- SEC-06 / OPTERYX-ACCESS-1: a workspace name cannot reach another workspace ---
+
+# Each of these, used as a store key, would file a policy whose pattern covers
+# some other workspace's resources while that workspace's own policy
+# collection never sees it.
+ESCAPING_WORKSPACES = [
+    "victim.*",  # pattern victim.*.* -- every dataset in victim
+    "victim.sales",  # pattern victim.sales.* -- one collection of victim
+    "victim.",
+    "*",
+    "a.b",
+    "vict?m",
+    "vict[i]m",
+    "Victim",  # pattern normalizes to victim.*, key stays Victim
+    "Kevin",  # KELVIN SIGN, lowercases to ASCII "k" -> kevin.*
+    "ｖictim",  # FULLWIDTH v
+    "victіm",  # CYRILLIC i
+    "victim ",
+    " victim",
+    "victim\n",
+    "victim/x",
+    "",
+    "1victim",
+    "$victim",
+    "public",
+]
+
+
+@pytest.mark.parametrize("workspace", ESCAPING_WORKSPACES)
+def test_bootstrap_refuses_a_workspace_name_that_is_not_one_literal_name(workspace):
+    store = FakePolicyStore()
+    with pytest.raises(InvalidPatternError):
+        bootstrap_workspace(
+            store, actor="mallory", workspace=workspace, grants=[("mallory", "owner")]
+        )
+    assert store.list_policies(workspace) == []
+
+
+@pytest.mark.parametrize("workspace", ESCAPING_WORKSPACES)
+def test_grant_refuses_a_workspace_key_that_is_not_one_literal_name(workspace):
+    # Even an "owner" seeded under the crafted key cannot use it to write.
+    store = FakePolicyStore()
+    store.seed(workspace, Policy(principal="mallory", role="owner", pattern="victim.*"))
+    with pytest.raises(InvalidPatternError):
+        grant(
+            store,
+            actor="mallory",
+            workspace=workspace,
+            principal="eve",
+            role="owner",
+            pattern="victim.*",
+        )
+
+
+def test_grant_refuses_a_pattern_outside_the_workspace_it_is_stored_in():
+    # mallory owns her own workspace; a policy filed there must not name victim.
+    store = FakePolicyStore()
+    store.seed("mallory", Policy(principal="mallory", role="owner", pattern="mallory.*"))
+    for pattern in ("victim.*", "victim.sales.*", "victim.sales.q1"):
+        with pytest.raises(InvalidPatternError):
+            grant(
+                store,
+                actor="mallory",
+                workspace="mallory",
+                principal="eve",
+                role="owner",
+                pattern=pattern,
+            )
+    stored = [Grant(role=p.role, pattern=p.pattern) for p in store.list_policies("mallory")]
+    assert not can_perform_action(stored, "victim.sales.q1", "DROP")
+
+
+def test_update_grant_cannot_move_a_policy_into_another_workspace():
+    store = FakePolicyStore()
+    store.seed("mallory", Policy(principal="mallory", role="owner", pattern="mallory.*"))
+    policy_id = store.seed(
+        "mallory", Policy(principal="eve", role="reader", pattern="mallory.sales.*")
+    )
+    with pytest.raises(InvalidPatternError):
+        update_grant(
+            store,
+            actor="mallory",
+            workspace="mallory",
+            policy_id=policy_id,
+            role="owner",
+            pattern="victim.*",
+        )
+    assert store.get_policy("mallory", policy_id).pattern == "mallory.sales.*"
+
+
+def test_a_bootstrapped_workspace_grant_does_not_match_another_workspace():
+    store = FakePolicyStore()
+    bootstrap_workspace(store, actor="mallory", workspace="mallory", grants=[("mallory", "owner")])
+    [policy] = store.list_policies("mallory")
+    assert policy.pattern == "mallory.*"
+    grants = [Grant(role=policy.role, pattern=policy.pattern)]
+    assert can_perform_action(grants, "mallory.sales.q1", "DROP")
+    assert not can_perform_action(grants, "victim.sales.q1", "DROP")
+    assert not can_perform_action(grants, "mallory_x.sales.q1", "READ")
+
+
+@pytest.mark.parametrize("workspace", ["acme", "a", "acme_2026", "x500"])
+def test_ordinary_workspace_names_are_accepted(workspace):
+    assert validate_workspace(workspace) == workspace
+    assert validate_workspace_pattern(workspace, f"{workspace}.sales.*") == f"{workspace}.sales.*"
+
+
+def test_a_trailing_newline_cannot_hide_inside_a_pattern_segment():
+    # `re.match` with `$` accepts "victim\n"; every segment is full-matched.
+    with pytest.raises(InvalidPatternError):
+        validate_pattern("victim\n.*")

@@ -170,7 +170,7 @@ def test_revoke_grant_resolves_a_differently_cased_grant():
     revoked = revoke_grant(
         store,
         actor="alice",
-        workspace="Analytics",
+        workspace="analytics",
         principal="BOB",
         role="writer",
         pattern="Analytics.Sales.*",

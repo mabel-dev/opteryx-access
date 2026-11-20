@@ -100,6 +100,8 @@ from opteryx_access.patterns import resource_matches
 from opteryx_access.patterns import validate_entitlement_pattern
 from opteryx_access.patterns import validate_pattern
 from opteryx_access.patterns import validate_principal
+from opteryx_access.patterns import validate_workspace
+from opteryx_access.patterns import validate_workspace_pattern
 from opteryx_access.roles import ROLES
 from opteryx_access.roles import is_valid_role
 from opteryx_access.roles import role_outranks_or_equals
@@ -174,5 +176,7 @@ __all__ = [
     "validate_entitlement_pattern",
     "validate_pattern",
     "validate_principal",
+    "validate_workspace",
+    "validate_workspace_pattern",
     "workspace_roles",
 ]

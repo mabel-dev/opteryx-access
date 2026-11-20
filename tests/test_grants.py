@@ -316,7 +316,9 @@ def test_update_grant_rejects_moving_under_unowned_pattern():
     policy_id = store.seed(
         "analytics", Policy(principal="bob", role="reader", pattern="analytics.sales.*")
     )
-    with pytest.raises(AccessDeniedError):
+    # Refused before authority is even asked: the new pattern is outside the
+    # workspace the policy is stored in.
+    with pytest.raises(InvalidPatternError):
         update_grant(
             store,
             actor="alice",
@@ -515,34 +517,42 @@ def test_bootstrap_workspace_sees_a_differently_cased_duplicate_principal():
         )
 
 
-def test_bootstrap_workspace_normalizes_the_workspace():
+def test_bootstrap_workspace_refuses_a_cased_workspace():
     # The store keys on the workspace name, and checks resolve the workspace
-    # from a normalized resource -- so a policy filed under a cased key would
-    # be invisible to them, and a second bootstrap under the other casing
-    # would mint a parallel set of owners.
+    # from a normalized resource -- so a cased key is a different key than the
+    # pattern names. Refused, not normalized: whatever passed the name in may
+    # use it as given.
     store = FakePolicyStore()
-    bootstrap_workspace(store, actor="system", workspace="Newspace", grants=[("alice", "owner")])
-    [policy] = store.list_policies("newspace")
-    assert policy.pattern == "newspace.*"
-    with pytest.raises(WorkspaceAlreadyBootstrappedError):
+    with pytest.raises(InvalidPatternError):
         bootstrap_workspace(
-            store, actor="system", workspace="newspace", grants=[("mallory", "owner")]
+            store, actor="system", workspace="Newspace", grants=[("alice", "owner")]
         )
+    assert store.list_policies("Newspace") == []
+    assert store.list_policies("newspace") == []
 
 
-def test_grant_and_revoke_normalize_the_workspace():
+def test_grant_and_revoke_refuse_a_cased_workspace():
     store = _owner_store()
+    with pytest.raises(InvalidPatternError):
+        grant(
+            store,
+            actor="alice",
+            workspace="ANALYTICS",
+            principal="bob",
+            role="reader",
+            pattern="analytics.sales.*",
+        )
     policy_id = grant(
         store,
         actor="alice",
-        workspace="ANALYTICS",
+        workspace="analytics",
         principal="bob",
         role="reader",
         pattern="analytics.sales.*",
     )
+    with pytest.raises(InvalidPatternError):
+        revoke(store, actor="alice", workspace="Analytics", policy_id=policy_id)
     assert store.get_policy("analytics", policy_id) is not None
-    revoke(store, actor="alice", workspace="Analytics", policy_id=policy_id)
-    assert store.get_policy("analytics", policy_id) is None
 
 
 def test_grants_for_principal_returns_only_the_matching_identity():

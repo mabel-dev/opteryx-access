@@ -49,8 +49,9 @@ from opteryx_access.models import Policy
 from opteryx_access.patterns import normalize
 from opteryx_access.patterns import pattern_level
 from opteryx_access.patterns import resource_matches
-from opteryx_access.patterns import validate_pattern
 from opteryx_access.patterns import validate_principal
+from opteryx_access.patterns import validate_workspace
+from opteryx_access.patterns import validate_workspace_pattern
 from opteryx_access.roles import ROLES
 from opteryx_access.roles import role_outranks_or_equals
 from opteryx_access.store import PolicyStore
@@ -180,13 +181,8 @@ def grant(
     """
     _validate_role(role)
     principal = validate_principal(principal)
-    pattern = validate_pattern(pattern)
+    pattern = validate_workspace_pattern(workspace, pattern)
     actor = normalize(actor)
-    # Workspace names are issued lowercase, so this is a no-op in practice --
-    # but the store keys on it, and a policy filed under a differently-cased
-    # key would be invisible to every check that resolves the workspace from
-    # a (normalized) resource name. Locked in here like every other field.
-    workspace = normalize(workspace)
 
     if principal == actor:
         raise SelfAccessError("you cannot grant yourself access; ask another owner to do it")
@@ -244,9 +240,8 @@ def update_grant(
             with itself.
     """
     _validate_role(role)
-    pattern = validate_pattern(pattern)
+    pattern = validate_workspace_pattern(workspace, pattern)
     actor = normalize(actor)
-    workspace = normalize(workspace)
 
     existing_policy = store.get_policy(workspace, policy_id)
     if existing_policy is None:
@@ -306,7 +301,7 @@ def revoke(store: PolicyStore, *, actor: str, workspace: str, policy_id: str) ->
             pattern -- not just anywhere in the workspace.
     """
     actor = normalize(actor)
-    workspace = normalize(workspace)
+    workspace = validate_workspace(workspace)
 
     existing_policy = store.get_policy(workspace, policy_id)
     if existing_policy is None:
@@ -377,9 +372,8 @@ def revoke_grant(
     """
     _validate_role(role)
     principal = validate_principal(principal)
-    pattern = validate_pattern(pattern)
+    pattern = validate_workspace_pattern(workspace, pattern)
     actor = normalize(actor)
-    workspace = normalize(workspace)
 
     if principal == actor:
         raise SelfAccessError("you cannot revoke your own access; ask another owner to do it")
@@ -466,8 +460,7 @@ def bootstrap_workspace(
             already does, which would let anyone holding a valid token mint
             themselves a fresh owner grant with none of `grant()`'s checks.
     """
-    workspace = normalize(workspace)
-    pattern = validate_pattern(f"{workspace}.*")
+    pattern = validate_workspace_pattern(workspace, f"{workspace}.*")
     actor = normalize(actor)
 
     validated = []
